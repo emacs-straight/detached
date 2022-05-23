@@ -1,6 +1,6 @@
 # detached.el
 
-[![GNU ELPA](https://elpa.gnu.org/detached.svg)](http://elpa.gnu.org/detached.html)
+[![GNU ELPA](https://elpa.gnu.org/packages/detached.svg)](https://elpa.gnu.org/packages/detached.html)
 [![GNU-devel ELPA](https://elpa.gnu.org/devel/detached.svg)](http://elpa.gnu.org/devel/detached.html)
 [![MELPA](https://melpa.org/packages/detached-badge.svg)](https://melpa.org/#/detached)
 [![MELPA Stable](https://stable.melpa.org/packages/detached-badge.svg)](https://stable.melpa.org/#/detached)
@@ -302,19 +302,7 @@ The `detached.el` package integrates with core Emacs packages as well as 3rd par
 By default `detached.el` uses the built in `notifications` library to issue a notification. This solution uses `dbus` but if that doesn't work for the user there is the possibility to set the `detached-notification-function` to `detached-state-transition-echo-message` to use the echo area instead. If that doesn't suffice there is the possibility to use the [alert](https://github.com/jwiegley/alert) package to get a system notification instead.
 
 ``` emacs-lisp
-(defun my/state-detached-transition-alert-notification (session)
-  "Send an `alert' notification when SESSION becomes inactive."
-  (let ((status (car (detached--session-status session)))
-        (host (car (detached--session-host session))))
-    (alert (detached--session-command session)
-           :title (pcase status
-                    ('success (format "Detached finished [%s]" host))
-                    ('failure (format "Detached failed [%s]" host)))
-           :severity (pcase status
-                       ('success 'moderate)
-                       ('failure 'high)))))
-
-(setq detached-notification-function #'my/detached-state-transition-alert-notification)
+(setq detached-notification-function #'detached-extra-alert-notification)
 ```
 
 # Versions
