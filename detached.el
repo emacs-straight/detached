@@ -810,13 +810,13 @@ This function uses the `notifications' library."
 (cl-defgeneric detached-dtach-command (entity &optional concat)
   "Return dtach command for ENTITY optionally CONCAT.")
 
-(cl-defgeneric detached-dtach-command ((command string) &optional concat)
+(cl-defmethod detached-dtach-command ((command string) &optional concat)
   "Return dtach command for COMMAND.
 
 Optionally CONCAT the command return command into a string."
   (detached-dtach-command (detached-create-session command) concat))
 
-(cl-defgeneric detached-dtach-command ((session detached-session) &optional concat)
+(cl-defmethod detached-dtach-command ((session detached-session) &optional concat)
   "Return dtach command for SESSION.
 
 Optionally CONCAT the command return command into a string."
@@ -1291,6 +1291,15 @@ If event is cased by an update to the `detached' database, re-initialize
                                     (seq-map #'length)
                                     (seq-max)
                                     (min width)))))
+
+(defun detached--metadata-git-branch ()
+  "Return current git branch."
+  (let ((args '("symbolic-ref" "HEAD" "--short")))
+    (with-temp-buffer
+      (apply #'process-file `("git" nil t nil ,@args))
+      (unless (bobp)
+        (goto-char (point-min))
+        (buffer-substring-no-properties (point) (line-end-position))))))
 
 ;;;;; UI
 
