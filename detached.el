@@ -354,16 +354,17 @@ The session is compiled by opening its output and enabling
           (tramp-verbose 1))
       (when (file-exists-p file)
         (with-current-buffer (get-buffer-create buffer-name)
-          (setq-local buffer-read-only nil)
-          (erase-buffer)
-          (insert (detached--session-output session))
-          (setq-local default-directory
-                      (detached--session-working-directory session))
-          (run-hooks 'detached-compile-session-hooks)
-          (detached-log-mode)
-          (compilation-minor-mode)
-          (setq detached--buffer-session session)
-          (setq-local font-lock-defaults '(compilation-mode-font-lock-keywords t))
+          (let ((inhibit-read-only t))
+            (setq-local buffer-read-only nil)
+            (erase-buffer)
+            (insert (detached--session-output session))
+            (setq-local default-directory
+                        (detached--session-working-directory session))
+            (run-hooks 'detached-compile-session-hooks)
+            (detached-log-mode)
+            (compilation-minor-mode)
+            (setq detached--buffer-session session)
+            (setq-local font-lock-defaults '(compilation-mode-font-lock-keywords t)))
           (font-lock-mode)
           (read-only-mode))
         (pop-to-buffer buffer-name)))))
@@ -465,10 +466,10 @@ Optionally DELETE the session if prefix-argument is provided."
       (if (file-exists-p file-path)
           (progn
             (with-current-buffer (get-buffer-create buffer-name)
-              (setq-local buffer-read-only nil)
-              (erase-buffer)
-              (insert (detached--session-output session))
-              (setq-local default-directory (detached--session-working-directory session))
+              (let ((inhibit-read-only t))
+                (erase-buffer)
+                (insert (detached--session-output session))
+                (setq-local default-directory (detached--session-working-directory session)))
               (detached-log-mode)
               (setq detached--buffer-session session)
               (goto-char (point-max)))
@@ -1294,12 +1295,13 @@ If event is cased by an update to the `detached' database, re-initialize
 
 (defun detached--metadata-git-branch ()
   "Return current git branch."
-  (let ((args '("symbolic-ref" "HEAD" "--short")))
+  (let ((args '("symbolic-ref" "HEAD" "--short"))
+        (process-file-return-signal-string t))
     (with-temp-buffer
-      (apply #'process-file `("git" nil t nil ,@args))
-      (unless (bobp)
-        (goto-char (point-min))
-        (buffer-substring-no-properties (point) (line-end-position))))))
+      (when (= 0 (apply #'process-file `("git" nil t nil ,@args)))
+        (unless (bobp)
+          (goto-char (point-min))
+          (buffer-substring-no-properties (point) (line-end-position)))))))
 
 ;;;;; UI
 
