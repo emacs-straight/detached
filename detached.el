@@ -87,12 +87,12 @@
   :type 'string
   :group 'detached)
 
-(defcustom detached-env nil
-  "The name of, or path to, the `detached' environment script."
+(defcustom detached-terminal-data-command "script --quiet --flush --return --command \"%s\" /dev/null"
+  "The command for the tool script, which is used to record terminal data."
   :type 'string
   :group 'detached)
 
-(defcustom detached-env-plain-text-commands nil
+(defcustom detached-plain-text-commands nil
   "A list of regexps for commands to run in plain-text mode."
   :type 'list
   :group 'detached)
@@ -168,7 +168,7 @@ If set to a non nil value the latest entry to
   :group 'detached)
 
 (defcustom detached-shell-mode-filter-functions
-  '(detached--detached-env-message-filter
+  '(detached--env-message-filter
     detached--dtach-eof-message-filter)
   "A list of filter functions that are run in `detached-shell-mode'."
   :type 'list
@@ -184,8 +184,6 @@ Valid values are: create, new and attach")
   "Variable to specify the origin of the session.")
 (defvar detached-session-action nil
   "A property list of actions for a session.")
-;; TODO Consider removing `detached-shell-command-history' if the new
-;; history override solution works.
 (defvar detached-shell-command-history nil
   "History of commands run with `detached-shell-command'.")
 (defvar detached-local-session nil
@@ -196,7 +194,7 @@ Valid values are: create, new and attach")
 (defvar detached-metadata-annotators-alist nil
   "An alist of annotators for metadata.")
 
-(defconst detached-session-version "0.7.0"
+(defconst detached-session-version "0.7.1"
   "The version of `detached-session'.
 This version is encoded as [package-version].[revision].")
 
@@ -284,7 +282,7 @@ This version is encoded as [package-version].[revision].")
   (metadata nil :read-only t)
   (host nil :read-only t)
   (attachable nil :read-only t)
-  (env-mode nil :read-only t)
+  (env nil :read-only t)
   (action nil :read-only t)
   (time nil)
   (status nil)
@@ -409,7 +407,7 @@ The session is compiled by opening its output and enabling
   (when (detached-valid-session session)
     (with-temp-buffer
       (insert (detached--session-output session))
-      (when (eq 'terminal-data (detached--session-env-mode session))
+      (when (eq 'terminal-data (detached--session-env session))
         ;; Enable `detached-log-mode' to parse ansi-escape sequences
         (detached-log-mode))
       (kill-new (buffer-string)))))
@@ -471,8 +469,8 @@ Optionally DELETE the session if prefix-argument is provided."
               (let ((inhibit-read-only t))
                 (erase-buffer)
                 (insert (detached--session-output session))
-                (setq-local default-directory (detached--session-working-directory session)))
-              (detached-log-mode)
+                (setq-local default-directory (detached--session-working-directory session))
+                (detached-log-mode))
               (setq detached--buffer-session session)
               (goto-char (point-max)))
             (pop-to-buffer buffer-name))
@@ -510,17 +508,28 @@ Optionally DELETE the session if prefix-argument is provided."
         (erase-buffer)
         (insert (detached--session-header session1))
         (insert (detached--session-output session1))
-        (when (eq 'terminal-data (detached--session-env-mode session1))
+        (when (eq 'terminal-data (detached--session-env session1))
           ;; Enable `detached-log-mode' to parse ansi-escape sequences
           (detached-log-mode)))
       (with-current-buffer (get-buffer-create buffer2)
         (erase-buffer)
         (insert (detached--session-header session2))
         (insert (detached--session-output session2))
-        (when (eq 'terminal-data (detached--session-env-mode session2))
+        (when (eq 'terminal-data (detached--session-env session2))
           ;; Enable `detached-log-mode' to parse ansi-escape sequences
           (detached-log-mode)))
       (ediff-buffers buffer1 buffer2))))
+
+;;;###autoload
+(defun detached-open-session-directory (session)
+  "Open SESSION's log directory."
+  (interactive
+   (list (detached-completing-read (detached-get-sessions))))
+  (let* ((file-path
+          (detached--session-file session 'log))
+         (tramp-verbose 1))
+    (when (file-exists-p file-path)
+      (dired-jump-other-window file-path))))
 
 ;;;###autoload
 (defun detached-detach-session ()
@@ -604,7 +613,7 @@ nil before closing."
                                   :size 0
                                   :directory (if detached-local-session detached-session-directory
                                                (concat (file-remote-p default-directory) detached-session-directory))
-                                  :env-mode (detached--env-mode command)
+                                  :env (detached--env command)
                                   :host (detached--host)
                                   :metadata (detached-metadata)
                                   :state 'unknown)))
@@ -692,6 +701,7 @@ Optionally SUPPRESS-OUTPUT."
     (unless (file-exists-p detached-db-directory)
       (make-directory detached-db-directory t))
     (detached--db-initialize)
+    (detached--register-detached-emacs )
     (setq detached--db-watch
       (file-notify-add-watch detached-db-directory
                              '(change attribute-change)
@@ -731,33 +741,28 @@ If session is not valid trigger an automatic cleanup on SESSION's host."
     (if (not (detached--session-missing-p session))
         t
       (let ((host (detached--session-host session)))
-        (message "Session does not exist. Initiate sesion cleanup on host %s" (car host))
+        (message "Session does not exist. Initiate session cleanup on host %s" (car host))
         (detached--cleanup-host-sessions host)
         nil))))
 
 (defun detached-session-exit-code-status (session)
   "Return status based on exit-code in SESSION."
-  (if (null detached-env)
-      `(unknown . 0)
-    (let ((detached-env-message
-           (with-temp-buffer
-             (insert-file-contents (detached--session-file session 'log))
-             (goto-char (point-max))
-             (thing-at-point 'line t)))
-          (success-message "Detached session finished")
-          (failure-message (rx "Detached session exited abnormally with code " (group (one-or-more digit)))))
-      (cond ((string-match success-message detached-env-message) `(success . 0))
-            ((string-match failure-message detached-env-message)
-             `(failure . ,(string-to-number (match-string 1 detached-env-message))))
-            (t `(unknown . 0))))))
+  (let ((detached-env-message
+         (with-temp-buffer
+           (insert-file-contents (detached--session-file session 'log))
+           (goto-char (point-max))
+           (thing-at-point 'line t)))
+        (failure-message (rx "detached-exit-code: " (group (one-or-more digit)))))
+    (cond ((string-match failure-message detached-env-message)
+           `(failure . ,(string-to-number (match-string 1 detached-env-message))))
+          (t `(success . 0)))))
 
 (defun detached-state-transitionion-echo-message (session)
   "Issue a notification when SESSION transitions from active to inactive.
 This function uses the echo area."
   (let ((status (pcase (car (detached--session-status session))
                   ('success "Detached finished")
-                  ('failure "Detached failed")
-                  ('unknown "Detached finished"))))
+                  ('failure "Detached failed"))))
     (message "%s [%s]: %s" status (car (detached--session-host session)) (detached--session-command session))))
 
 (defun detached-state-transition-notifications-message (session)
@@ -768,13 +773,11 @@ This function uses the `notifications' library."
     (notifications-notify
      :title (pcase status
               ('success (format "Detached finished [%s]" host))
-              ('failure (format "Detached failed [%s]" host))
-              ('unknown (format "Detached finished [%s]" host)))
+              ('failure (format "Detached failed [%s]" host)))
      :body (detached--session-command session)
      :urgency (pcase status
                 ('success 'normal)
-                ('failure 'critical)
-                ('unknown 'normal)))))
+                ('failure 'critical)))))
 
 (defun detached-view-dwim (session)
   "View SESSION in a do what I mean fashion."
@@ -783,8 +786,6 @@ This function uses the `notifications' library."
            (detached-view-session session))
           ((eq 'failure status)
            (detached-compile-session session))
-          ((eq 'unknown status)
-           (detached-view-session session))
           (t (message "Detached session is in an unexpected state.")))))
 
 (defun detached-get-sessions ()
@@ -982,7 +983,7 @@ Optionally CONCAT the command return command into a string."
     (seq-reverse reverse-sessions)))
 
 (defun detached--decode-session (item)
-  "Return the session assicated with ITEM."
+  "Return the session associated with ITEM."
   (cdr (assoc item detached--session-candidates)))
 
 (defun detached--validate-unknown-sessions ()
@@ -1023,7 +1024,7 @@ Optionally make the path LOCAL to host."
 (defun detached--session-output (session)
   "Return content of SESSION's output."
   (let* ((filename (detached--session-file session 'log))
-         (detached-message (rx (regexp "\n?\nDetached session ") (or "finished" "exited"))))
+         (detached-message (rx (regexp "\n.detached-exit-code:.*"))))
     (with-temp-buffer
       (insert-file-contents filename)
       (goto-char (point-min))
@@ -1054,7 +1055,7 @@ Optionally make the path LOCAL to host."
 
 (defun detached--db-initialize ()
   "Return all sessions stored in database."
-  (let ((db (expand-file-name "detached.db" detached-db-directory)))
+  (let ((db (expand-file-name "detached-sessions.db" detached-db-directory)))
     (when (file-exists-p db)
       (with-temp-buffer
         (insert-file-contents db)
@@ -1106,10 +1107,46 @@ Optionally make the path LOCAL to host."
 (defun detached--db-update-sessions ()
   "Write `detached--sessions' to database."
   (detached-initialize-sessions)
-  (let ((db (expand-file-name "detached.db" detached-db-directory)))
+  (let ((db (expand-file-name "detached-sessions.db" detached-db-directory)))
     (with-temp-file db
       (insert (format ";; Detached Session Version: %s\n\n" detached-session-version))
       (prin1 detached--sessions (current-buffer)))))
+
+(defun detached--read-detached-emacsen ()
+  "Read the PIDs of detached Emacsen."
+  (let ((file (expand-file-name "detached-emacsen" detached-db-directory)))
+    (when (file-exists-p file)
+      (with-temp-buffer
+        (insert-file-contents file)
+        (cl-assert (bobp))
+        (read (current-buffer))))))
+
+(defun detached--register-detached-emacs ()
+  "Register Emacs PID."
+  (let* ((file (expand-file-name "detached-emacsen" detached-db-directory))
+         (emacsen
+          (seq-uniq (append (detached--read-detached-emacsen)
+                            `(,(emacs-pid))))))
+    (with-temp-file file
+      (insert (format ";; Detached Emacsen\n\n"))
+      (prin1 emacsen (current-buffer)))))
+
+(defun detached--primary-detached-emacs-p ()
+  "Return t if `(emacs-pid)' is the primary detached Emacs."
+  (let ((emacsen (detached--read-detached-emacsen))
+        (system-processes (list-system-processes)))
+    (thread-last emacsen
+                 (seq-find (lambda (emacs-pid) (member emacs-pid system-processes)))
+                 (= (emacs-pid)))))
+
+(defun detached--remove-detached-emacsen ()
+  "Remove terminated Emacsen from the list."
+  (let* ((system-processes (list-system-processes))
+         (emacses (thread-last (detached--read-detached-emacsen)
+                               (seq-filter (lambda (it) (member it system-processes))))))
+    (with-temp-file (expand-file-name "detached-emacsen" detached-db-directory)
+      (insert (format ";; Detached Emacsen\n\n"))
+      (prin1 emacses (current-buffer)))))
 
 ;;;;; Other
 
@@ -1159,7 +1196,7 @@ Optionally make the path LOCAL to host."
 (defun detached--detached-command (session)
   "Return the detached command for SESSION.
 
-If SESSION is nonattachable fallback to a command that doesn't rely on tee."
+If SESSION is non-attachable fallback to a command that doesn't rely on tee."
   (let* ((log (detached--session-file session 'log t))
          (begin-shell-group (if (string= "fish" (file-name-nondirectory detached-shell-program))
                                 "begin;"
@@ -1171,19 +1208,22 @@ If SESSION is nonattachable fallback to a command that doesn't rely on tee."
           (if (detached--session-attachable session)
               (format "2>&1 | tee %s" log)
             (format "&> %s" log)))
-         (env (if detached-env detached-env (format "%s -c" detached-shell-program)))
+         (shell (format "%s -c" detached-shell-program))
          (command
-          (if detached-env
-              (concat (format "%s " (detached--session-env-mode session))
-                      (shell-quote-argument (detached--session-command session)))
-            (shell-quote-argument (detached--session-command session)))))
-    (format "%s %s %s; %s %s" begin-shell-group env command end-shell-group redirect)))
+          (shell-quote-argument
+           (format "if %s; then true; else echo \"[detached-exit-code: $?]\"; fi"
+                   (if (eq 'terminal-data (detached--session-env session))
+                       (format "TERM=eterm-color %s"
+                               (format detached-terminal-data-command
+                                       (detached--session-command session)))
+                     (detached--session-command session))))))
+    (format "%s %s %s; %s %s" begin-shell-group shell command end-shell-group redirect)))
 
-(defun detached--env-mode (command)
-  "Return mode to run in `detached-env' based on COMMAND."
+(defun detached--env (command)
+  "Return the environment to run in COMMAND in."
   (if (seq-find (lambda (regexp)
                   (string-match-p regexp command))
-                detached-env-plain-text-commands)
+                detached-plain-text-commands)
       'plain-text
     'terminal-data))
 
@@ -1218,9 +1258,9 @@ log to deduce the end time."
   (let ((current-time (current-time-string)))
     (secure-hash 'md5 (concat command current-time))))
 
-(defun detached--detached-env-message-filter (str)
+(defun detached--env-message-filter (str)
   "Remove `detached-env' message in STR."
-  (replace-regexp-in-string "\n?Detached session.*\n?" "" str))
+  (replace-regexp-in-string "\n?.*detached-exit-code:.*\n?" "" str))
 
 (defun detached--dtach-eof-message-filter (str)
   "Remove `detached--dtach-eof-message' in STR."
@@ -1251,10 +1291,13 @@ session and trigger a state transition."
                (string= "socket" (file-name-extension file)))
       (when-let* ((id (intern (file-name-base file)))
                   (session (detached--db-get-session id))
-                  (session-directory (detached--session-directory session)))
-
+                  (session-directory (detached--session-directory session))
+                  (is-primary (detached--primary-detached-emacs-p)))
         ;; Update session
         (detached--session-state-transition-update session)
+
+        ;; Update Emacsen
+        (detached--remove-detached-emacsen)
 
         ;; Remove session directory from `detached--watch-session-directory'
         ;; if there is no active session associated with the directory
@@ -1275,10 +1318,18 @@ session and trigger a state transition."
 If event is cased by an update to the `detached' database, re-initialize
 `detached--sessions'."
   (pcase-let* ((`(,_descriptor ,action ,file) event)
-               (database-updated  (and (string= "detached.db" file)
-                                       (eq 'attribute-changed action))))
-    (when database-updated)
-    (detached--db-initialize)))
+               (database-updated (and (string-match "detached-sessions.db$" file)
+                                      (or (eq 'attribute-changed action)
+                                          (eq 'changed action)))))
+    (when database-updated
+      ;; Re-initialize the sessions
+      (detached--db-initialize)
+      ;; Make sure to watch session directories
+      (thread-last (detached--db-get-sessions)
+                   (seq-filter (lambda (it) (eq 'active (detached--session-state it))))
+                   (seq-map #'detached--session-directory)
+                   (seq-uniq)
+                   (seq-do #'detached--watch-session-directory)))))
 
 (defun detached--annotation-widths (sessions annotation-format)
   "Return widths for ANNOTATION-FORMAT based on SESSIONS."
