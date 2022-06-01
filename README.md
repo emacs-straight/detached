@@ -103,7 +103,6 @@ The package also provides additional commands to interact with a session.
 |-------------------------------------|---------------------------------------------|
 | detached-view-session (v)           | View a session's output                     |
 | detached-attach-session (a)         | Attach to a session                         |
-| detached-tail-session  (t)          | Tail the output of an active session        |
 | detached-diff-session (=)           | Diff a session with another session         |
 | detached-compile-session (c)        | Open the session output in compilation mode |
 | detached-rerun-session (r)          | Rerun a session                             |
@@ -193,7 +192,6 @@ The package provides the following customizable variables.
 | detached-timer-configuration         | Configuration of the timer that runs on remote hosts                             |
 | detached-annotation-format           | A list of annotations that should be present in completion                       |
 | detached-command-format              | A configuration for displaying a session command                                 |
-| detached-tail-interval               | How often `detached.el` should refresh the output when tailing                   |
 | detached-nonattachable-commands      | A list of commands that should be considered nonattachable                       |
 | detached-notification-function       | Specifies which function to issue notifications with                             |
 | detached-detach-key                  | Specifies which keybinding to use to detach from a session                       |
@@ -285,6 +283,29 @@ The tool `script` can have different options depending on version and operating 
 ```
 
 Which is compatible with the options described in [script(1) - Linux manual page](https://man7.org/linux/man-pages/man1/script.1.html).
+
+## Chained commands
+
+With `detached` there exist the possibility to use callback. This functionality makes it possible to create chained sessions, essentially starting a new session once a previous one is finished. Here is an example:
+
+``` emacs-lisp
+;; The detached commands are run in serial.
+;; This is equivalent to run sleep 1 && ls && ls -la
+(let* ((default-directory "/tmp")
+       (detached-session-action
+        `(,@detached-shell-command-session-action
+          :callback (lambda (session1)
+                      (when (eq 'success (detached-session-status session1))
+                        (let ((default-directory (detached--session-working-directory session1))
+                              (detached-session-action
+                               `(,@detached-shell-command-session-action
+                                 :callback (lambda (session2)
+                                             (when (eq 'success (detached-session-status session2))
+                                               (let ((default-directory (detached--session-working-directory session2)))
+                                                 (detached-start-session "ls -la" t)))))))
+                          (detached-start-session "ls" t)))))))
+  (detached-start-session "sleep 1" t))
+```
 
 # Tips & Tricks
 
