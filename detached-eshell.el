@@ -47,10 +47,7 @@
 (defun detached-eshell-external-command (orig-fun &rest args)
   "Advice `eshell-external-command' to optionally use `detached'."
   (let* ((detached-session-action detached-eshell-session-action)
-         (command (string-trim-right
-                   (mapconcat #'identity
-                              (flatten-list args)
-                              " ")))
+         (command (string-trim-right (string-join (flatten-list args) " ")))
          (session (detached-create-session command))
          (command (detached--shell-command session)))
     (advice-remove #'eshell-external-command #'detached-eshell-external-command)
@@ -60,7 +57,6 @@
 
 ;;;; Commands
 
-;;;###autoload
 (defun detached-eshell-send-input (&optional detach)
   "Create a session and attach to it.
 
@@ -73,7 +69,6 @@ If prefix-argument directly DETACH from the session."
     (advice-add #'eshell-external-command :around #'detached-eshell-external-command)
     (call-interactively #'eshell-send-input)))
 
-;;;###autoload
 (defun detached-eshell-attach-session (session)
   "Attach to SESSION."
   (interactive

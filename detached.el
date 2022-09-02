@@ -3,7 +3,7 @@
 ;; Copyright (C) 2020-2022  Free Software Foundation, Inc.
 
 ;; Author: Niklas Eklund <niklas.eklund@posteo.net>
-;; Maintainer: Niklas Eklund <niklas.eklund@posteo.net>
+;; Maintainer: detached.el Development <~niklaseklund/detached.el@lists.sr.ht>
 ;; URL: https://sr.ht/~niklaseklund/detached.el/
 ;; Version: 0.7
 ;; Package-Requires: ((emacs "27.1"))
@@ -48,7 +48,9 @@
 (require 'comint)
 (require 'notifications)
 (require 'filenotify)
+(eval-when-compile (require 'rx))
 (require 'simple)
+(require 'subr-x)
 (require 'tramp)
 
 (declare-function detached-eshell--get-dtach-process "detached-eshell")
@@ -627,8 +629,8 @@ Optionally SUPPRESS-OUTPUT."
                         (seq-map #'detached--session-command)
                         (seq-map #'length)
                         (seq-max)
-                        (min (plist-get detached-command-format ':width)))))
-      (let ((command-fun (plist-get detached-command-format ':function)))
+                        (min (plist-get detached-command-format :width)))))
+      (let ((command-fun (plist-get detached-command-format :function)))
         (setq detached--session-candidates
               (thread-last sessions
                            (seq-map (lambda (it)
@@ -643,8 +645,7 @@ Optionally SUPPRESS-OUTPUT."
 (defun detached-session-annotation (item)
   "Associate ITEM to a session and return ts annotation."
   (let ((session (cdr (assoc item detached--session-candidates))))
-    (mapconcat
-     #'identity
+    (string-join
      (cl-loop for annotation in detached-annotation-format
               collect (let ((str (funcall (plist-get annotation :function) session))
                             (width (alist-get (plist-get annotation :function) detached--annotation-widths)))
@@ -654,8 +655,7 @@ Optionally SUPPRESS-OUTPUT."
                             (propertize str 'face (plist-get annotation :face))
                             width
                             0 ?\s)
-                           (make-string (plist-get annotation :padding) ?\s)
-                           ))))
+                           (make-string (plist-get annotation :padding) ?\s)))))
      "")))
 
 ;;;###autoload
@@ -832,11 +832,11 @@ Optionally CONCAT the command return command into a string."
                   (detached--current-session session))
               (detached-start-session (detached--session-command session))
               (if concat
-                  (mapconcat #'identity tail-command " ")
+                  (string-join tail-command " ")
                 tail-command)))
            ((eq 'attach detached-session-mode)
             (if concat
-                (mapconcat #'identity tail-command " ")
+                (string-join tail-command " ")
               tail-command))))))
 
 (cl-defgeneric detached--dtach-command (entity &optional concat)
@@ -859,27 +859,27 @@ Optionally CONCAT the command return command into a string."
      (setq detached--buffer-session session)
      (if (eq detached-session-mode 'attach)
          (if concat
-             (mapconcat #'identity
-                        `(,(when detached-show-session-context
-                             (format  "%s --lines=%s %s;" detached-tail-program detached-session-context-lines log))
-                          ,detached-dtach-program
-                          ,dtach-arg
-                          ,socket
-                          "-r none")
-                        " ")
+             (string-join
+              `(,(when detached-show-session-context
+                   (format  "%s --lines=%s %s;" detached-tail-program detached-session-context-lines log))
+                ,detached-dtach-program
+                ,dtach-arg
+                ,socket
+                "-r none")
+              " ")
            (append
             (when detached-show-session-context
               `(,detached-tail-program ,(format "--lines=%s" detached-session-context-lines)
                                        ,(concat log ";")))
             `(,detached-dtach-program ,dtach-arg ,socket "-r" "none")))
        (if concat
-           (mapconcat #'identity
-                      `(,detached-dtach-program
-                        ,dtach-arg
-                        ,socket "-z"
-                        ,detached-shell-program "-c"
-                        ,(shell-quote-argument (detached--detached-command session)))
-                      " ")
+           (string-join
+            `(,detached-dtach-program
+              ,dtach-arg
+              ,socket "-z"
+              ,detached-shell-program "-c"
+              ,(shell-quote-argument (detached--detached-command session)))
+            " ")
          `(,detached-dtach-program
            ,dtach-arg ,socket "-z"
            ,detached-shell-program "-c"
@@ -971,8 +971,7 @@ Optionally CONCAT the command return command into a string."
 
 (defun detached--session-header (session)
   "Return header for SESSION."
-  (mapconcat
-   #'identity
+  (string-join
    `(,(format "Command: %s" (detached--session-command session))
      ,(format "Working directory: %s" (detached--working-dir-str session))
      ,(format "Host: %s" (car (detached--session-host session)))
@@ -1370,8 +1369,8 @@ If event is cased by an update to the `detached' database, re-initialize
 
 (defun detached--annotation-width (sessions annotation)
   "Determine width for ANNOTATION based on SESSIONS."
-  (let ((annotation-fun (plist-get annotation ':function))
-        (width (plist-get annotation ':width)))
+  (let ((annotation-fun (plist-get annotation :function))
+        (width (plist-get annotation :width)))
     `(,annotation-fun .
                       ,(thread-last sessions
                                     (seq-map annotation-fun)
