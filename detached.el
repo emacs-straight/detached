@@ -81,6 +81,11 @@
   :type 'string
   :group 'detached)
 
+(defcustom detached-grep-program "grep"
+  "The name of the grep program."
+  :type 'string
+  :group 'detached)
+
 (defcustom detached-shell-program shell-file-name
   "Path to the shell to run the dtach command in."
   :type 'string
@@ -209,6 +214,9 @@ Valid values are: create, new and attach")
 (defvar detached-compile-session-hooks nil
   "Hooks to run when compiling a session.")
 
+(defvar detached-update-db-hooks nil
+  "Hooks to run when the database is updated.")
+
 (defvar detached-metadata-annotators-alist nil
   "An alist of annotators for metadata.")
 
@@ -297,6 +305,9 @@ This version is encoded as [package-version].[revision].")
 
 (defvar detached--annotation-widths nil
   "An alist of widths to use for annotation.")
+
+(defvar detached--update-database t
+  "Update the database when value is t.")
 
 (defconst detached--shell-command-buffer "*Detached Shell Command*"
   "Name of the `detached-shell-command' buffer.")
@@ -736,9 +747,11 @@ Optionally SUPPRESS-OUTPUT."
     ;; Initialize accessible sessions
     (let ((detached--current-emacsen (detached--active-detached-emacsen)))
       (detached--update-detached-emacsen)
-      (thread-last (detached--db-get-sessions)
-                   (seq-filter #'detached--session-accessible-p)
-                   (seq-do #'detached--initialize-session)))))
+      (let ((detached--update-database nil))
+        (thread-last (detached--db-get-sessions)
+                     (seq-filter #'detached--session-accessible-p)
+                     (seq-do #'detached--initialize-session)))
+      (detached--db-update-sessions))))
 
 (defun detached-valid-session (session)
   "Ensure that SESSION is valid.
@@ -801,9 +814,12 @@ This function uses the `notifications' library."
 (defun detached-get-sessions ()
   "Return as initialized sessions as possible."
   ;; Try to initialize unknown sessions
-  (thread-last (detached--uninitialized-sessions)
-               (seq-filter #'detached--session-accessible-p)
-               (seq-do #'detached--initialize-session))
+  (when-let* ((detached--update-database nil)
+              (initialized-sessions
+               (thread-last (detached--uninitialized-sessions)
+                            (seq-filter #'detached--session-accessible-p)
+                            (seq-do #'detached--initialize-session))))
+    (detached--db-update-sessions))
   (detached--db-get-sessions))
 
 (defun detached-shell-command-attach-session (session)
@@ -1079,17 +1095,6 @@ Optionally CONCAT the command return command into a string."
   "Return the session associated with ITEM."
   (cdr (assoc item detached--session-candidates)))
 
-(defun detached--validate-unknown-sessions ()
-  "Validate `detached' sessions with state unknown."
-  (thread-last (detached--db-get-sessions)
-               (seq-filter (lambda (it) (eq 'unknown (detached--session-state it))))
-               (seq-filter #'detached--session-accessible-p)
-               (seq-do (lambda (it)
-                         (if (detached--session-missing-p it)
-                             (detached--db-remove-entry it)
-                           (setf (detached--session-state it) 'active)
-                           (detached--db-update-entry it t))))))
-
 (defun detached--create-session-validator (session)
   "Create a function to validate SESSION.
 
@@ -1200,7 +1205,8 @@ Optionally make the path LOCAL to host."
 (defun detached--db-insert-entry (session)
   "Insert SESSION into `detached--sessions' and update database."
   (push `(,(detached--session-id session) . ,session) detached--sessions)
-  (detached--db-update-sessions))
+  (when detached--update-database
+    (detached--db-update-sessions)))
 
 (defun detached--db-remove-entry (session)
   "Remove SESSION from `detached--sessions', delete log and update database."
@@ -1209,12 +1215,13 @@ Optionally make the path LOCAL to host."
       (delete-file log)))
   (setq detached--sessions
         (assq-delete-all (detached--session-id session) detached--sessions))
-  (detached--db-update-sessions))
+  (when detached--update-database
+    (detached--db-update-sessions)))
 
-(defun detached--db-update-entry (session &optional update)
-  "Update SESSION in `detached--sessions' optionally UPDATE database."
+(defun detached--db-update-entry (session)
+  "Update SESSION in `detached--sessions' and the database."
   (setf (alist-get (detached--session-id session) detached--sessions) session)
-  (when update
+  (when detached--update-database
     (detached--db-update-sessions)))
 
 (defun detached--db-get-session (id)
@@ -1227,6 +1234,7 @@ Optionally make the path LOCAL to host."
 
 (defun detached--db-update-sessions ()
   "Write `detached--sessions' to database."
+  (run-hooks 'detached-update-db-hooks)
   (let ((db (expand-file-name "detached-sessions.db" detached-db-directory)))
     (with-temp-file db
       (insert (format ";; Detached Session Version: %s\n\n" detached-session-version))
@@ -1294,6 +1302,7 @@ Optionally make the path LOCAL to host."
   (if (detached--uninitialized-session-p session)
       (progn
         (detached--initialize-session session)
+        (detached--db-update-sessions)
         (detached--db-get-session (detached--session-id session)))
     session))
 
@@ -1325,7 +1334,7 @@ Optionally make the path LOCAL to host."
   (funcall detached-notification-function session)
 
   ;; Update session in database
-  (detached--db-update-entry session t)
+  (detached--db-update-entry session)
 
   ;; Execute callback
   (when-let ((callback (plist-get (detached--session-action session) :callback)))
@@ -1485,11 +1494,11 @@ session and trigger a state transition."
   (if (detached--active-session-p session)
       (if (detached--state-transition-p session)
           (detached--session-state-transition-update session)
-        (detached--db-update-entry session t)
+        (detached--db-update-entry session)
         (detached--watch-session-directory (detached--session-directory session)))
     (if (detached--session-missing-p session)
         (detached--db-remove-entry session)
-      (detached--db-update-entry session t))))
+      (detached--db-update-entry session))))
 
 (defun detached--uninitialized-sessions ()
   "Return a list of uninitialized sessions."

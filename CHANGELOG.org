@@ -4,6 +4,13 @@
 
 * Development
 
+- Use =display-buffer= in =detached-list= in order for users to more easily customize the display of the buffer.
+- Add concept of =filters= to quickly apply a set of narrow criteria.
+- Speed up initialization of sessions.
+- Narrow criteria are persistent and applied when resuming detached list sessions.
+- Add narrow criterion which searches through the output of all sessions in detached list which matches a regexp.
+- Add database hook in order for detached list to update automatically when a session is updated.
+
 * Version 0.9.1 (2022-09-22)
 
 - Fix bug with detaching in =shell=

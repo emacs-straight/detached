@@ -88,20 +88,27 @@ detached list implements."
 
 ;;;; Commands
 
-(defun detached-list-quit-dwim ()
-  "Quit DWIM command."
+(defun detached-list-quit ()
+  "Quit command."
+  (interactive)
+  (if (= (length (window-list)) 1)
+      (bury-buffer)
+    (bury-buffer)
+    (delete-window)))
+
+(defun detached-list-remove-narrow-criterion ()
+  "Remove narrow criterion."
   (interactive)
   (if detached-list--filters
       (detached-list-update-narrowing
        (cdr detached-list--filters))
-    (if (> (length (window-list)) 1)
-        (kill-buffer-and-window)
-      (kill-current-buffer))))
+    (message "No criterion to remove")))
 
 (defun detached-list-widen ()
-  "Remove narrowing restrictions."
+  "Remove all narrowing restrictions."
   (interactive)
-  (detached-list-update-narrowing nil))
+  (when detached-list--filters
+    (detached-list-update-narrowing nil)))
 
 (defun detached-list-detach-from-session (session)
   "Detach from SESSION at point."
@@ -184,9 +191,64 @@ Optionally SUPPRESS-OUTPUT."
   (when hostname
     (detached-list-narrow-sessions
      `((,(concat "Host: " hostname) .
-        ,(lambda (session)
-           (string-match hostname
-                         (car (detached--session-host session)))))
+        ,(lambda (sessions)
+           (seq-filter (lambda (it)
+                         (string-match hostname
+                                       (car (detached--session-host it))))
+                       sessions)))
+       ,@detached-list--filters))))
+
+(defun detached-list-narrow-output-regexp (regexp)
+  "Narrow to sessions which output contain REGEXP."
+  (interactive
+   (list (read-regexp
+          "Filter session outputs containing (regexp): ")))
+  (when regexp
+    (detached-list-narrow-sessions
+     `((,(concat "Output: " regexp) .
+        ,(lambda (sessions)
+           (let* ((sessions-and-directories
+                   (thread-last sessions
+                                (seq-group-by #'detached--session-directory)
+                                (seq-filter (lambda (it)
+                                              ;; Filter out only accessible directories
+                                              (or (not (file-remote-p (car it)))
+                                                  (file-remote-p (car it) nil t))))))
+                  (session-ids
+                   (thread-last sessions-and-directories
+                                (seq-map
+                                 (lambda (it)
+                                   (pcase-let* ((`(,session-directory . ,sessions) it)
+                                                (default-directory session-directory)
+                                                (includes
+                                                 (seq-map (lambda (session)
+                                                            (format "--include=%s"
+                                                                    (file-name-nondirectory
+                                                                     (detached--session-file
+                                                                      session
+                                                                      'log))))
+                                                          sessions))
+                                                (grep-command
+                                                 (string-join `(,detached-grep-program
+                                                                "--files-with-matches"
+                                                                ,@includes
+                                                                "--no-messages"
+                                                                "--ignore-case"
+                                                                "--recursive"
+                                                                ,(format "\"%s\"" regexp))
+                                                              " ")))
+                                     (split-string
+                                      (with-connection-local-variables
+                                       (with-temp-buffer
+                                         (process-file-shell-command grep-command nil t)
+                                         (buffer-string)))
+                                      "\n" t))))
+                                (flatten-tree)
+                                (seq-remove #'null)
+                                (seq-map #'file-name-sans-extension))))
+             (seq-filter (lambda (it)
+                           (member (symbol-name (detached--session-id it)) session-ids))
+                         sessions))))
        ,@detached-list--filters))))
 
 (defun detached-list-narrow-regexp (regexp)
@@ -197,9 +259,11 @@ Optionally SUPPRESS-OUTPUT."
   (when regexp
     (detached-list-narrow-sessions
      `((,(concat "Regexp: " regexp) .
-        ,(lambda (session)
-           (string-match regexp
-                         (detached--session-command session))))
+        ,(lambda (sessions)
+           (seq-filter (lambda (it)
+                         (string-match regexp
+                                       (detached--session-command it)))
+                       sessions)))
        ,@detached-list--filters))))
 
 (defun detached-list-narrow-local ()
@@ -207,8 +271,8 @@ Optionally SUPPRESS-OUTPUT."
   (interactive)
   (detached-list-narrow-sessions
    `(("Local" .
-      ,(lambda (session)
-         (detached--local-session-p session)))
+      ,(lambda (sessions)
+         (seq-filter #'detached--local-session-p sessions)))
      ,@detached-list--filters)))
 
 (defun detached-list-narrow-remote ()
@@ -216,8 +280,8 @@ Optionally SUPPRESS-OUTPUT."
   (interactive)
   (detached-list-narrow-sessions
    `(("Remote" .
-      ,(lambda (session)
-         (detached--remote-session-p session)))
+      ,(lambda (sessions)
+         (seq-filter #'detached--remote-session-p sessions)))
      ,@detached-list--filters)))
 
 (defun detached-list-select-filter ()
@@ -225,6 +289,7 @@ Optionally SUPPRESS-OUTPUT."
   (interactive)
   (when-let* ((filter-name (completing-read "Select filter: " detached-list-filters))
               (filter (alist-get filter-name detached-list-filters nil nil #'string=)))
+    (setq detached-list--filters nil)
     (seq-do (lambda (it) (apply it)) filter)))
 
 (defun detached-list-narrow-origin (origin)
@@ -243,9 +308,12 @@ Optionally SUPPRESS-OUTPUT."
   (when origin
     (detached-list-narrow-sessions
      `((,(concat "Origin: " origin) .
-        ,(lambda (session)
-           (string-match origin
-                         (symbol-name (detached--session-origin session)))))
+        ,(lambda (sessions)
+           (seq-filter
+            (lambda (it)
+              (string-match origin
+                            (symbol-name (detached--session-origin it))))
+              sessions)))
        ,@detached-list--filters))))
 
 (defun detached-list-narrow-active ()
@@ -253,8 +321,8 @@ Optionally SUPPRESS-OUTPUT."
   (interactive)
   (detached-list-narrow-sessions
    `(("Active" .
-      ,(lambda (session)
-         (detached--active-session-p session)))
+      ,(lambda (sessions)
+         (seq-filter #'detached--active-session-p sessions)))
      ,@detached-list--filters)))
 
 (defun detached-list-narrow-inactive ()
@@ -262,8 +330,8 @@ Optionally SUPPRESS-OUTPUT."
   (interactive)
   (detached-list-narrow-sessions
    `(("Inactive" .
-      ,(lambda (session)
-         (null (detached--active-session-p session))))
+      ,(lambda (sessions)
+         (seq-remove #'detached--active-session-p sessions)))
      ,@detached-list--filters)))
 
 (defun detached-list-narrow-success ()
@@ -271,8 +339,10 @@ Optionally SUPPRESS-OUTPUT."
   (interactive)
   (detached-list-narrow-sessions
    `(("Success" .
-     ,(lambda (session)
-        (eq 'success (car (detached--session-status session)))))
+      ,(lambda (sessions)
+         (seq-filter (lambda (it)
+                       (eq 'success (car (detached--session-status it))))
+                     sessions)))
      ,@detached-list--filters)))
 
 (defun detached-list-narrow-failure ()
@@ -280,8 +350,10 @@ Optionally SUPPRESS-OUTPUT."
   (interactive)
   (detached-list-narrow-sessions
    `(("Failure" .
-      ,(lambda (session)
-         (eq 'failure (car (detached--session-status session)))))
+      ,(lambda (sessions)
+         (seq-filter (lambda (it)
+                       (eq 'failure (car (detached--session-status it))))
+                     sessions)))
      ,@detached-list--filters)))
 
 (defun detached-list-mark-regexp (regexp)
@@ -308,11 +380,13 @@ If prefix-argument is provided unmark instead of mark."
   (when (y-or-n-p (if detached-list--marked-sessions
                       "Delete all marked sessions? "
                     "Delete session at point? "))
-    (seq-do
-     (lambda (session)
-       (detached-list--unmark-session session)
-       (detached-delete-session session))
-     (detached-list--get-marked-or-current-sessions))
+    (let ((detached--update-database nil))
+      (seq-do
+       (lambda (session)
+         (detached-list--unmark-session session)
+         (detached-delete-session session))
+       (detached-list--get-marked-or-current-sessions)))
+    (detached--db-update-sessions)
     (detached-list-revert)))
 
 (defun detached-list-mark-session ()
@@ -369,14 +443,18 @@ If prefix-argument is provided unmark instead of mark."
 (defun detached-list-sessions ()
   "Open list of `detached'."
   (interactive)
-  (let* ((buffer (detached-list--get-buffer))
-         (window (display-buffer buffer detached-list-display-buffer-action)))
-    (with-selected-window window
-      (detached-list-mode)
-      (setq tabulated-list-entries
-            (seq-map #'detached-list--get-entry
-                     (detached-list--get-filtered-sessions)))
-      (tabulated-list-print t))))
+  (if-let* ((existing-buffer (detached-list--get-list-mode-buffer))
+            (window (display-buffer existing-buffer detached-list-display-buffer-action)))
+      (with-selected-window window
+        (detached-list--revert-sessions))
+    (let* ((buffer (detached-list--get-buffer))
+           (window (display-buffer buffer detached-list-display-buffer-action)))
+      (with-selected-window window
+        (detached-list-mode)
+        (setq tabulated-list-entries
+              (seq-map #'detached-list--get-entry
+                       (detached-list--get-filtered-sessions)))
+        (tabulated-list-print t)))))
 
 (defun detached-list-narrow-sessions (filters)
   "Narrow session(s) based on FILTERS."
@@ -409,6 +487,19 @@ If prefix-argument is provided unmark instead of mark."
       (tabulated-list-print t))))
 
 ;;;; Support functions
+
+(defun detached-list--db-update ()
+  "Function to run when the database is updated."
+  (when-let ((detached-list-buffer (detached-list--get-list-mode-buffer)))
+    (with-current-buffer detached-list-buffer
+      (detached-list-revert))))
+
+(defun detached-list--get-list-mode-buffer ()
+  "Return buffer with `detached-list-mode'."
+  (seq-find (lambda (buffer)
+              (with-current-buffer buffer
+                (eq major-mode 'detached-list-mode)))
+            (buffer-list)))
 
 (defun detached-list--get-buffer (&optional filters)
   "Return buffer based on FILTERS."
@@ -511,13 +602,11 @@ If prefix-argument is provided unmark instead of mark."
 
 (defun detached-list--get-filtered-sessions ()
   "Return a list of filtered sessions."
-  (thread-last (detached-get-sessions)
-               (seq-filter (lambda (session)
-                             (seq-every-p
-                              (lambda (it) it)
-                              (seq-map (lambda (filter)
-                                         (funcall (cdr filter) session))
-                                       detached-list--filters))))))
+  (let ((sessions (detached-get-sessions)))
+    (seq-do (lambda (filter)
+              (setq sessions (funcall (cdr filter) sessions)))
+            detached-list--filters)
+    sessions))
 
 ;;;; Major mode
 
@@ -537,8 +626,9 @@ If prefix-argument is provided unmark instead of mark."
     (define-key map (kbd "n o") #'detached-list-narrow-origin)
     (define-key map (kbd "n r") #'detached-list-narrow-remote)
     (define-key map (kbd "n s") #'detached-list-narrow-success)
+    (define-key map (kbd "n /") #'detached-list-narrow-output-regexp)
     (define-key map (kbd "n %") #'detached-list-narrow-regexp)
-    (define-key map (kbd "q") #'detached-list-quit-dwim)
+    (define-key map (kbd "q") #'detached-list-quit)
     (define-key map (kbd "r") #'detached-list-rerun-session)
     (define-key map (kbd "s") #'imenu)
     (define-key map (kbd "t") #'detached-list-toggle-mark-session)
@@ -552,6 +642,7 @@ If prefix-argument is provided unmark instead of mark."
     (define-key map (kbd "=") #'detached-list-diff-marked-sessions)
     (define-key map (kbd "-") #'detached-list-widen)
     (define-key map (kbd "!") #'detached-shell-command)
+    (define-key map (kbd "<backspace>") #'detached-list-remove-narrow-criterion)
     (define-key map (kbd "<return>") #'detached-list-open-session)
     map)
   "Keymap used in `detached-list-mode'.")
