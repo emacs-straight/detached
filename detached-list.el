@@ -445,16 +445,17 @@ If prefix-argument is provided unmark instead of mark."
   (interactive)
   (if-let* ((existing-buffer (detached-list--get-list-mode-buffer))
             (window (display-buffer existing-buffer detached-list-display-buffer-action)))
-      (with-selected-window window
+      (progn
+        (select-window window)
         (detached-list--revert-sessions))
     (let* ((buffer (detached-list--get-buffer))
            (window (display-buffer buffer detached-list-display-buffer-action)))
-      (with-selected-window window
-        (detached-list-mode)
-        (setq tabulated-list-entries
-              (seq-map #'detached-list--get-entry
-                       (detached-list--get-filtered-sessions)))
-        (tabulated-list-print t)))))
+      (select-window window)
+      (detached-list-mode)
+      (setq tabulated-list-entries
+            (seq-map #'detached-list--get-entry
+                     (detached-list--get-filtered-sessions)))
+      (tabulated-list-print t))))
 
 (defun detached-list-narrow-sessions (filters)
   "Narrow session(s) based on FILTERS."
@@ -615,7 +616,7 @@ If prefix-argument is provided unmark instead of mark."
     (define-key map (kbd "d") #'detached-list-delete-session)
     (define-key map (kbd "f") #'detached-list-select-filter)
     (define-key map (kbd "g") #'detached-list-revert)
-    (define-key map (kbd "j") #'detached-list-jump-to-directory)
+    (define-key map (kbd "j") #'imenu)
     (define-key map (kbd "k") #'detached-list-kill-session)
     (define-key map (kbd "m") #'detached-list-mark-session)
     (define-key map (kbd "n a") #'detached-list-narrow-active)
@@ -630,7 +631,6 @@ If prefix-argument is provided unmark instead of mark."
     (define-key map (kbd "n %") #'detached-list-narrow-regexp)
     (define-key map (kbd "q") #'detached-list-quit)
     (define-key map (kbd "r") #'detached-list-rerun-session)
-    (define-key map (kbd "s") #'imenu)
     (define-key map (kbd "t") #'detached-list-toggle-mark-session)
     (define-key map (kbd "T") #'detached-list-toggle-sessions)
     (define-key map (kbd "u") #'detached-list-unmark-session)
