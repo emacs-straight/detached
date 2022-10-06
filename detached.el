@@ -191,6 +191,12 @@ If set to a non nil value the latest entry to
   :type 'float
   :group 'detached)
 
+(defcustom detached-open-session-display-buffer-action
+  '(display-buffer-pop-up-window)
+  "The action used to display a detached session."
+  :group 'detached
+  :type 'sexp)
+
 ;;;;; Public
 
 (defvar detached-enabled nil)
@@ -427,7 +433,8 @@ The session is compiled by opening its output and enabling
           (font-lock-mode)
           (read-only-mode)
           (goto-char (point-max)))
-        (pop-to-buffer buffer-name)))))
+        (select-window
+         (display-buffer buffer-name detached-open-session-display-buffer-action))))))
 
 ;;;###autoload
 (defun detached-rerun-session (session &optional suppress-output)
@@ -534,7 +541,8 @@ Optionally DELETE the session if prefix-argument is provided."
                 (detached-log-mode))
               (setq detached--buffer-session session)
               (goto-char (point-max)))
-            (pop-to-buffer buffer-name))
+            (select-window
+             (display-buffer buffer-name detached-open-session-display-buffer-action)))
         (message "Detached can't find file: %s" file-path)))))
 
 ;;;###autoload
@@ -597,7 +605,9 @@ active session.  For sessions created with `detached-compile' or
               (comint-simple-send process detached--dtach-detach-character)
               (message "[detached]"))
             (setq detached--buffer-session nil)
-            (kill-buffer-and-window))
+            (if (= (length (window-list)) 1)
+                (kill-buffer)
+              (kill-buffer-and-window)))
         (if (eq 'active (detached--determine-session-state detached--buffer-session))
             ;; `detached-eshell'
             (if-let ((process (and (eq major-mode 'eshell-mode)
@@ -1153,7 +1163,8 @@ Optionally make the path LOCAL to host."
 (defun detached--session-output (session)
   "Return content of SESSION's output."
   (let* ((filename (detached--session-file session 'log))
-         (detached-message (rx (regexp "\n.detached-exit-code:.*"))))
+         (detached-message
+          (rx (regexp "\n.*\\[detached-exit-code: .*\\]"))))
     (with-temp-buffer
       (insert-file-contents filename)
       (detached--maybe-watch-session session)
