@@ -32,6 +32,7 @@
 (declare-function vterm-send-C-e "vterm")
 (declare-function vterm-send-return "vterm")
 (declare-function vterm-end-of-line "vterm")
+(declare-function vterm-beginning-of-line "vterm")
 
 (defvar vterm--process)
 
@@ -52,14 +53,17 @@
 
 Optionally DETACH from it."
   (interactive)
-  (vterm-send-C-a)
-  (let* ((input (buffer-substring-no-properties (point) (vterm-end-of-line)))
+  (let* ((input (buffer-substring-no-properties (vterm-beginning-of-line) (vterm-end-of-line)))
          (detached-session-origin 'vterm)
          (detached-session-action detached-vterm-session-action)
          (detached-session-mode
-          (if detach 'create 'create-and-attach)))
+          (if detach 'create 'create-and-attach))
+         (detached--current-session (detached-create-session input))
+         (command (detached--shell-command detached--current-session t)))
+    (vterm-send-C-a)
     (vterm-send-C-k)
-    (process-send-string vterm--process (detached--shell-command input t))
+    (process-send-string vterm--process command)
+    (setq detached--buffer-session detached--current-session)
     (vterm-send-C-e)
     (vterm-send-return)))
 
@@ -78,9 +82,8 @@ Optionally DETACH from it."
     (process-send-string vterm--process (detached--shell-command session t))
     (vterm-send-return)))
 
-(defun detached-vterm-detach ()
-  "Detach from a `detached' session."
-  (interactive)
+(cl-defmethod detached--detach-session ((_mode (derived-mode vterm-mode)))
+  "Detach from session when MODE is `vterm-mode'."
   (process-send-string
    vterm--process
    detached--dtach-detach-character))
@@ -91,7 +94,7 @@ Optionally DETACH from it."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "<S-return>") #'detached-vterm-send-input)
     (define-key map (kbd "<C-return>") #'detached-vterm-attach)
-    (define-key map (kbd detached-detach-key) #'detached-vterm-detach)
+    (define-key map (kbd detached-detach-key) #'detached-detach-session)
     map)
   "Keymap for `detached-vterm-mode'.")
 
