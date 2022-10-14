@@ -79,6 +79,7 @@ Optionally DETACH from it."
                          (seq-filter (lambda (it) (eq 'active (detached--determine-session-state it)))))))
       (detached-completing-read sessions))))
   (let ((detached-session-mode 'attach))
+    (setq detached--buffer-session session)
     (process-send-string vterm--process (detached--shell-command session t))
     (vterm-send-return)))
 
@@ -94,6 +95,7 @@ Optionally DETACH from it."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "<S-return>") #'detached-vterm-send-input)
     (define-key map (kbd "<C-return>") #'detached-vterm-attach)
+    (define-key map (kbd "C-c C-.") #'detached-describe-session)
     (define-key map (kbd detached-detach-key) #'detached-detach-session)
     map)
   "Keymap for `detached-vterm-mode'.")
