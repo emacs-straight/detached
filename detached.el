@@ -205,6 +205,14 @@ If set to a non nil value the latest entry to
   :group 'detached
   :type 'sexp)
 
+(defcustom detached-session-info-buffer-action
+  '(display-buffer-in-side-window
+                 (side . bottom)
+                 (dedicated . t))
+  "The action used to display a information about a detached session."
+  :group 'detached
+  :type 'sexp)
+
 ;;;;; Public
 
 (defvar detached-enabled nil)
@@ -240,6 +248,9 @@ Valid values are: create, new and attach")
 (defconst detached-session-version "0.9.1.1"
   "The version of `detached-session'.
 This version is encoded as [package-version].[revision].")
+
+(defconst detached-minimum-session-version "0.9.1.1"
+  "The version of `detached-session' that the package is compatible with.")
 
 ;;;;; Faces
 
@@ -465,10 +476,16 @@ The session is compiled by opening its output and enabling
 (defun detached-describe-session ()
   "Describe current session."
   (interactive)
-  (when-let ((session (detached--get-session major-mode)))
-    (message
-     (string-trim
-      (detached--session-header session)))))
+  (when-let* ((session (detached--get-session major-mode))
+              (buffer (get-buffer-create "*detached-session-info*"))
+              (window (display-buffer buffer detached-session-info-buffer-action)))
+    (select-window window)
+    (with-current-buffer buffer
+      (erase-buffer)
+      (insert
+       (string-trim
+        (detached--session-header session)))
+      (goto-char (point-min)))))
 
 ;;;###autoload
 (defun detached-attach-session (session)
@@ -1081,6 +1098,7 @@ Optionally CONCAT the command return command into a string."
      ,(format "Host: %s" (car (detached--session-host session)))
      ,(format "Id: %s" (symbol-name (detached--session-id session)))
      ,(format "Status: %s" (car (detached--session-status session)))
+     ,(format "Annotation: %s" (if-let ((annotation (detached--session-annotation session))) annotation ""))
      ,(format "Exit-code: %s" (cdr (detached--session-status session)))
      ,(format "Metadata: %s" (detached--metadata-str session))
      ,(format "Created at: %s" (detached--creation-str session))
@@ -1245,9 +1263,11 @@ Optionally make the path LOCAL to host."
       (with-temp-buffer
         (insert-file-contents db)
         (cl-assert (bobp))
-        (when (string= (detached--db-session-version) detached-session-version)
+        (if (detached--verify-db-compatibility)
           (setq detached--sessions
-                (read (current-buffer))))))))
+                (read (current-buffer)))
+          (warn "Detached database has version %s while minimum version is %s"
+                (detached--db-session-version) detached-minimum-session-version))))))
 
 (defun detached--db-session-version ()
   "Return `detached-session-version' from database."
@@ -1360,7 +1380,37 @@ Optionally make the path LOCAL to host."
         (detached--db-get-session (detached--session-id session)))
     session))
 
+(defun detached--verify-db-compatibility ()
+  "Verify that the database version is compatible with the package."
+  (let ((minimum-version
+         (detached--decode-version-string detached-minimum-session-version))
+        (db-version
+         (detached--decode-version-string (detached--db-session-version))))
+    (if (> (plist-get db-version :major) (plist-get minimum-version :major))
+        t
+      (when (= (plist-get db-version :major) (plist-get minimum-version :major))
+        (if (> (plist-get db-version :minor) (plist-get minimum-version :minor))
+            t
+          (when (= (plist-get db-version :minor) (plist-get minimum-version :minor))
+            (if (> (plist-get db-version :patch) (plist-get minimum-version :patch))
+                t
+              (when (= (plist-get db-version :patch) (plist-get minimum-version :patch))
+                (>= (plist-get db-version :revision) (plist-get minimum-version :revision))))))))))
+
 ;;;;; Other
+
+(defun detached--decode-version-string (version)
+  "Return a decode property list of VERSION."
+  (let ((version-regexp
+         (rx (group (one-or-more digit)) "."
+             (group (one-or-more digit)) "."
+             (group (one-or-more digit)) "."
+             (group (one-or-more digit)))))
+    (when (string-match version-regexp version)
+      `(:major ,(string-to-number (match-string 1 version))
+        :minor ,(string-to-number (match-string 2 version))
+        :patch ,(string-to-number (match-string 3 version))
+        :revision ,(string-to-number (match-string 4 version))))))
 
 (defun detached--dtach-arg ()
   "Return dtach argument based on `detached-session-mode'."
@@ -1370,13 +1420,14 @@ Optionally make the path LOCAL to host."
     ('attach "-a")
     (_ (error "`detached-session-mode' has an unknown value"))))
 
-(defun detached--session-state-transition-update (session)
-  "Update SESSION due to state transition."
-  ;; Update session
+(defun detached--session-state-transition-update (session &optional approximate)
+  "Update SESSION due to state transition.
+
+Optionally specify if the end-time should be APPROXIMATE or not."
   (let ((session-size (file-attribute-size
                        (file-attributes
                         (detached--session-file session 'log))))
-        (session-time (detached--update-session-time session) )
+        (session-time (detached--update-session-time session approximate))
         (status-fun (or (plist-get (detached--session-action session) :status)
                         #'detached-session-exit-code-status)))
     (setf (detached--session-size session) session-size)
@@ -1547,7 +1598,7 @@ session and trigger a state transition."
 
   (if (detached--active-session-p session)
       (if (detached--state-transition-p session)
-          (detached--session-state-transition-update session)
+          (detached--session-state-transition-update session 'approximate)
         (detached--db-update-entry session)
         (detached--watch-session-directory (detached--session-directory session)))
     (if (detached--session-missing-p session)

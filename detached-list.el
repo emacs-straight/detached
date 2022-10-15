@@ -224,6 +224,44 @@ Optionally SUPPRESS-OUTPUT."
       (bury-buffer buffer))
     (detached-open-session session)))
 
+(defun detached-list-narrow-after-time (time-threshold)
+  "Narrow to session's created after TIME-THRESHOLD."
+  (interactive
+   (list
+    (read-string "Enter time: ")))
+  (when time-threshold
+    (if-let ((parsed-threshold (detached--list-parse-time time-threshold)))
+        (detached-list-narrow-sessions
+         `((,(format "+%s" time-threshold) .
+            ,(lambda (sessions)
+               (let ((current-time (time-to-seconds (current-time))))
+                 (seq-filter (lambda (it)
+                               (< (- current-time
+                                     (plist-get (detached--session-time it) :start))
+                                  parsed-threshold))
+                             sessions))))
+           ,@detached-list--filters))
+      (message "Cannot parse time"))))
+
+(defun detached-list-narrow-before-time (time-threshold)
+  "Narrow to session's created before TIME-THRESHOLD."
+  (interactive
+   (list
+    (read-string "Enter time: ")))
+  (when time-threshold
+    (if-let ((parsed-threshold (detached--list-parse-time time-threshold)))
+      (detached-list-narrow-sessions
+       `((,(format "-%s" time-threshold) .
+          ,(lambda (sessions)
+             (let ((current-time (time-to-seconds (current-time))))
+               (seq-filter (lambda (it)
+                             (> (- current-time
+                                   (plist-get (detached--session-time it) :start))
+                                parsed-threshold))
+                           sessions))))
+         ,@detached-list--filters))
+      (message "Cannot parse time"))))
+
 (defun detached-list-narrow-host (hostname)
   "Narrow to sessions from a selected HOSTNAME."
   (interactive
@@ -255,48 +293,7 @@ Optionally SUPPRESS-OUTPUT."
     (detached-list-narrow-sessions
      `((,(concat "Output: " regexp) .
         ,(lambda (sessions)
-           (let* ((sessions-and-directories
-                   (thread-last sessions
-                                (seq-group-by #'detached--session-directory)
-                                (seq-filter (lambda (it)
-                                              ;; Filter out only accessible directories
-                                              (or (not (file-remote-p (car it)))
-                                                  (file-remote-p (car it) nil t))))))
-                  (session-ids
-                   (thread-last sessions-and-directories
-                                (seq-map
-                                 (lambda (it)
-                                   (pcase-let* ((`(,session-directory . ,sessions) it)
-                                                (default-directory session-directory)
-                                                (includes
-                                                 (seq-map (lambda (session)
-                                                            (format "--include=%s"
-                                                                    (file-name-nondirectory
-                                                                     (detached--session-file
-                                                                      session
-                                                                      'log))))
-                                                          sessions))
-                                                (grep-command
-                                                 (string-join `(,detached-grep-program
-                                                                "--files-with-matches"
-                                                                ,@includes
-                                                                "--no-messages"
-                                                                "--ignore-case"
-                                                                "--recursive"
-                                                                ,(format "\"%s\"" regexp))
-                                                              " ")))
-                                     (split-string
-                                      (with-connection-local-variables
-                                       (with-temp-buffer
-                                         (process-file-shell-command grep-command nil t)
-                                         (buffer-string)))
-                                      "\n" t))))
-                                (flatten-tree)
-                                (seq-remove #'null)
-                                (seq-map #'file-name-sans-extension))))
-             (seq-filter (lambda (it)
-                           (member (symbol-name (detached--session-id it)) session-ids))
-                         sessions))))
+           (detached--grep-sesssions-output sessions regexp)))
        ,@detached-list--filters))))
 
 (defun detached-list-narrow-regexp (regexp)
@@ -530,11 +527,28 @@ If prefix-argument is provided unmark instead of mark."
 
 ;;;; Support functions
 
+(defun detached--revert-selection-change (&rest _)
+  "Revert function to add to `window-selection-change-functions'."
+  (detached-list-revert))
+
 (defun detached-list--initialize-directory (directory)
   "Initialize sessions in DIRECTORY."
   (thread-last (detached-get-sessions)
                (seq-filter (lambda (it) (string= directory (detached--session-directory it))))
                (seq-do #'detached--initialize-session)))
+
+(defun detached--list-parse-time (time)
+  "Return a value in seconds based on TIME."
+  (when time
+    (cond ((string-match (rx (group (one-or-more digit)) "h") time)
+           (* 60 60 (string-to-number (match-string 1 time))))
+          ((string-match (rx (group (one-or-more digit)) space "day" (zero-or-more "s")) time)
+           (* 60 60 24 (string-to-number (match-string 1 time))))
+          ((string-match (rx (group (one-or-more digit)) space "week" (zero-or-more "s")) time)
+           (* 60 60 24 7 (string-to-number (match-string 1 time))))
+          ((string-match (rx (group (one-or-more digit)) space "month" (zero-or-more "s")) time)
+           (* 60 60 24 7 30 (string-to-number (match-string 1 time))))
+          ('t nil))))
 
 (defun detached-list--db-update ()
   "Function to run when the database is updated."
@@ -648,6 +662,51 @@ If prefix-argument is provided unmark instead of mark."
   "Return session when in `detached-list-mode'."
   (tabulated-list-get-id))
 
+(defun detached--grep-sesssions-output (sessions regexp)
+  "Return a narrowed list with SESSIONS containing REGEXP."
+  (let* ((sessions-and-directories
+          (thread-last sessions
+                       (seq-group-by #'detached--session-directory)
+                       (seq-filter (lambda (it)
+                                     ;; Filter out only accessible directories
+                                     (or (not (file-remote-p (car it)))
+                                         (file-remote-p (car it) nil t))))))
+         (session-ids
+          (thread-last sessions-and-directories
+                       (seq-map
+                        (lambda (it)
+                          (pcase-let* ((`(,session-directory . ,sessions) it)
+                                       (default-directory session-directory)
+                                       (includes
+                                        (seq-map (lambda (session)
+                                                   (format "--include=%s"
+                                                           (file-name-nondirectory
+                                                            (detached--session-file
+                                                             session
+                                                             'log))))
+                                                 sessions))
+                                       (grep-command
+                                        (string-join `(,detached-grep-program
+                                                       "--files-with-matches"
+                                                       ,@includes
+                                                       "--no-messages"
+                                                       "--ignore-case"
+                                                       "--recursive"
+                                                       ,(format "\"%s\"" regexp))
+                                                     " ")))
+                            (split-string
+                             (with-connection-local-variables
+                              (with-temp-buffer
+                                (process-file-shell-command grep-command nil t)
+                                (buffer-string)))
+                             "\n" t))))
+                       (flatten-tree)
+                       (seq-remove #'null)
+                       (seq-map #'file-name-sans-extension))))
+    (seq-filter (lambda (it)
+                  (member (symbol-name (detached--session-id it)) session-ids))
+                sessions)))
+
 ;;;; Major mode
 
 (defvar detached-list-mode-map
@@ -668,6 +727,8 @@ If prefix-argument is provided unmark instead of mark."
     (define-key map (kbd "n o") #'detached-list-narrow-origin)
     (define-key map (kbd "n r") #'detached-list-narrow-remote)
     (define-key map (kbd "n s") #'detached-list-narrow-success)
+    (define-key map (kbd "n +") #'detached-list-narrow-after-time)
+    (define-key map (kbd "n -") #'detached-list-narrow-before-time)
     (define-key map (kbd "n /") #'detached-list-narrow-output-regexp)
     (define-key map (kbd "n % a") #'detached-list-narrow-annotation-regexp)
     (define-key map (kbd "n % c") #'detached-list-narrow-regexp)
@@ -711,6 +772,7 @@ If prefix-argument is provided unmark instead of mark."
   (hl-line-mode)
   (add-hook 'eldoc-documentation-functions #'detached-list-eldoc nil t)
   (add-hook 'tabulated-list-revert-hook #'detached-list--revert-sessions nil t)
+  (add-hook 'window-selection-change-functions #'detached--revert-selection-change nil t)
   (setq-local mode-line-position '((:eval (detached-list--mode-line-indicator))))
   (tabulated-list-init-header))
 
