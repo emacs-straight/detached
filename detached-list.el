@@ -32,9 +32,8 @@
 ;;;; Variables
 
 (defcustom detached-list-config
-  `((:name "Command" :function detached--session-command :length 60)
-    (:name "State" :function detached-list--state-str :length 10 :face detached-state-face)
-    (:name "Status" :function detached-list--status-str :length 10 :face detached-failure-face)
+  `((:name "Command" :function detached-list--command-str :length 60)
+    (:name "Status" :function detached-list--status-str :length 10)
     (:name "Host" :function detached--host-str :length 15 :face detached-host-face)
     (:name "Directory" :function detached--working-dir-str :length 40 :face detached-working-dir-face)
     (:name "Metadata" :function detached--metadata-str :length 30 :face detached-metadata-face)
@@ -69,6 +68,22 @@ detached list implements."
   :group 'detached
   :type '(alist :key-type string))
 
+(defcustom detached-list-session-identifier-function
+  #'detached-list-session-identifier
+  "The function to use for identifying a session."
+  :group 'detached
+  :type 'sexp)
+
+(defcustom detached-list-state-symbols
+  '((active . "*")
+    (failure . "!")
+    (success . " ")
+    (initially-attached . "o")
+    (initially-detached . " "))
+  "An alist of symbols to use to communicate different states."
+  :group 'detached
+  :type '(alist :key-type symbol :value-type string))
+
 ;;;; Private
 
 (defvar detached-list--marked-sessions nil
@@ -93,10 +108,18 @@ detached list implements."
   "A member of `eldoc-documentation-functions', for signatures."
   (let ((session (tabulated-list-get-id)))
     (when (detached-session-p session)
-      (let ((strs `(,(detached--session-command session)
-                    ,(when-let  ((annotation (detached--session-annotation session)))
-                       (propertize annotation 'face 'detached-annotation-face)))))
+      (let ((strs `(,(when-let  ((annotation (detached--session-annotation session)))
+                       (propertize annotation 'face 'detached-annotation-face))
+                    ,(detached--session-command session))))
         (string-join (seq-remove #'null strs) "\n")))))
+
+(defun detached-list-session-identifier (session)
+  "Return a string identifier for SESSION."
+  (string-join
+   `(,(detached--session-command session)
+     ,(detached--host-str session)
+     ,(detached--session-directory session))
+   ", "))
 
 ;;;; Commands
 
@@ -139,7 +162,7 @@ Optionally initialize ALL session-directories."
   (interactive)
   (if detached-list--narrow-criteria
       (detached-list-narrow-sessions
-       (cdr detached-list--narrow-criteria))
+       (butlast detached-list--narrow-criteria))
     (message "No criterion to remove")))
 
 (defun detached-list-widen ()
@@ -199,25 +222,36 @@ Optionally DELETE the session if prefix-argument is provided."
          detached-list-open-session-display-buffer-action))
     (detached-view-dwim session)))
 
-(defun detached-list-rerun-session (session &optional suppress-output)
+(defun detached-list-rerun-session (session &optional toggle-suppress-output)
   "Rerun SESSION at point.
 
-Optionally SUPPRESS-OUTPUT."
+Optionally TOGGLE-SUPPRESS-OUTPUT."
   (interactive
    (list (tabulated-list-get-id)
          current-prefix-arg))
-  (when (eq 'create-and-attach (detached--session-initial-mode session))
-    (when-let ((single-window (> (length (window-list)) 1))
-               (buffer (current-buffer)))
-      (delete-window (get-buffer-window))
-      (bury-buffer buffer)))
-  (detached-rerun-session session suppress-output))
+  (let ((detached-session-mode
+         (if toggle-suppress-output
+             (if (eq 'create (detached--session-initial-mode session))
+                 'create-and-attach
+               'create)
+           (detached--session-initial-mode session))))
+    (unless (eq detached-session-mode 'create)
+      (when-let ((single-window (> (length (window-list)) 1))
+                 (buffer (current-buffer)))
+        (delete-window (get-buffer-window))
+        (bury-buffer buffer)))
+    (detached-rerun-session session)))
 
 (defun detached-list-diff-marked-sessions ()
   "Diff two sessions."
   (interactive)
   (if (= (length detached-list--marked-sessions) 2)
-      (apply #'detached-diff-session detached-list--marked-sessions)
+      (progn
+        (when-let ((single-window (> (length (window-list)) 1))
+                 (buffer (current-buffer)))
+        (delete-window (get-buffer-window))
+        (bury-buffer buffer))
+        (apply #'detached-diff-session detached-list--marked-sessions))
     (message "Mark two sessions")))
 
 (defun detached-list-open-session ()
@@ -232,6 +266,24 @@ Optionally SUPPRESS-OUTPUT."
       (bury-buffer buffer))
     (detached-open-session session)))
 
+(defun detached-list-narrow-unique ()
+  "Narrow to unique sessions."
+  (interactive)
+  (when detached-list-session-identifier-function
+    (detached-list-narrow-sessions
+     `(,@detached-list--narrow-criteria
+       ("Unique" .
+        ,(lambda (sessions)
+           (thread-last sessions
+                        (seq-group-by detached-list-session-identifier-function)
+                        (seq-map (lambda (it)
+                                   (pcase-let ((`(,_identifier . ,duplicate-sessions) it))
+                                     (car duplicate-sessions))))
+                        (seq-sort-by
+                         (lambda (it)
+                           (plist-get (detached--session-time it) :start))
+                         #'>))))))))
+
 (defun detached-list-narrow-after-time (time-threshold)
   "Narrow to session's created after TIME-THRESHOLD."
   (interactive
@@ -240,15 +292,15 @@ Optionally SUPPRESS-OUTPUT."
   (when time-threshold
     (if-let ((parsed-threshold (detached--list-parse-time time-threshold)))
         (detached-list-narrow-sessions
-         `((,(format "+%s" time-threshold) .
+         `(,@detached-list--narrow-criteria
+           (,(format "+%s" time-threshold) .
             ,(lambda (sessions)
                (let ((current-time (time-to-seconds (current-time))))
                  (seq-filter (lambda (it)
                                (< (- current-time
                                      (plist-get (detached--session-time it) :start))
                                   parsed-threshold))
-                             sessions))))
-           ,@detached-list--narrow-criteria))
+                             sessions))))))
       (message "Cannot parse time"))))
 
 (defun detached-list-narrow-before-time (time-threshold)
@@ -259,15 +311,15 @@ Optionally SUPPRESS-OUTPUT."
   (when time-threshold
     (if-let ((parsed-threshold (detached--list-parse-time time-threshold)))
       (detached-list-narrow-sessions
-       `((,(format "-%s" time-threshold) .
+       `(,@detached-list--narrow-criteria
+         (,(format "-%s" time-threshold) .
           ,(lambda (sessions)
              (let ((current-time (time-to-seconds (current-time))))
                (seq-filter (lambda (it)
                              (> (- current-time
                                    (plist-get (detached--session-time it) :start))
                                 parsed-threshold))
-                           sessions))))
-         ,@detached-list--narrow-criteria))
+                           sessions))))))
       (message "Cannot parse time"))))
 
 (defun detached-list-narrow-host (hostname)
@@ -284,73 +336,119 @@ Optionally SUPPRESS-OUTPUT."
        hostnames))))
   (when hostname
     (detached-list-narrow-sessions
-     `((,(concat "Host: " hostname) .
+     `(,@detached-list--narrow-criteria
+       (,(concat "Host: " hostname) .
         ,(lambda (sessions)
            (seq-filter (lambda (it)
                          (string-match hostname
                                        (car (detached--session-host it))))
-                       sessions)))
-       ,@detached-list--narrow-criteria))))
+                       sessions)))))))
 
-(defun detached-list-narrow-output-regexp (regexp)
+(defun detached-list-narrow-output (regexp)
   "Narrow to sessions which output contain REGEXP."
   (interactive
    (list (read-regexp
           "Filter session outputs containing (regexp): ")))
   (when regexp
     (detached-list-narrow-sessions
-     `((,(concat "Output: " regexp) .
+     `(,@detached-list--narrow-criteria
+       (,(concat "Output: " regexp) .
         ,(lambda (sessions)
-           (detached--grep-sesssions-output sessions regexp)))
-       ,@detached-list--narrow-criteria))))
+           (detached--grep-sesssions-output sessions regexp)))))))
 
-(defun detached-list-narrow-regexp (regexp)
+(defun detached-list-narrow-command (regexp)
   "Narrow to sessions which command match REGEXP."
   (interactive
-   (list (read-regexp
-          "Filter session commands containing (regexp): ")))
+   (list
+    (if current-prefix-arg
+        (regexp-quote
+         (detached--session-command
+          (detached--get-session major-mode)))
+        (read-regexp
+              "Filter session commands containing (regexp): "))))
   (when regexp
     (detached-list-narrow-sessions
-     `((,(concat "Regexp: " regexp) .
+     `(,@detached-list--narrow-criteria
+       (,(concat "Command: " regexp) .
         ,(lambda (sessions)
            (seq-filter (lambda (it)
                          (string-match regexp
                                        (detached--session-command it)))
-                       sessions)))
-       ,@detached-list--narrow-criteria))))
+                       sessions)))))))
 
-(defun detached-list-narrow-annotation-regexp (regexp)
+(defun detached-list-narrow-working-directory (regexp)
+  "Narrow to sessions with working directory matching REGEXP."
+  (interactive
+   (list
+    (if current-prefix-arg
+        (regexp-quote
+         (detached--session-working-directory
+          (detached--get-session major-mode)))
+        (read-regexp
+              "Filter session working directories containing (regexp): "))))
+  (when regexp
+    (detached-list-narrow-sessions
+     `(,@detached-list--narrow-criteria
+       (,(concat "Working-Directory: " regexp) .
+        ,(lambda (sessions)
+           (seq-filter (lambda (it)
+                         (string-match regexp
+                                       (detached--session-working-directory it)))
+                       sessions)))))))
+
+(defun detached-list-narrow-session-directory (session-directory)
+  "Narrow to sessions with SESSION-DIRECTORY."
+  (interactive
+   (list
+    (when-let* ((directories
+                 (thread-last (detached-list--get-narrowed-sessions)
+                              (seq-map #'detached--session-directory)
+                              (seq-uniq))))
+      (completing-read
+       "Select session directory: "
+       directories))))
+  (when session-directory
+    (detached-list-narrow-sessions
+     `(,@detached-list--narrow-criteria
+       (,(concat "Session-Directory: " session-directory) .
+        ,(lambda (sessions)
+           (seq-filter (lambda (it)
+                         (string-match session-directory
+                                       (detached--session-directory it)))
+                       sessions)))))))
+
+(defun detached-list-narrow-annotation (regexp)
   "Narrow to sessions which annotation match REGEXP."
   (interactive
    (list (read-regexp
           "Filter session annotations containing (regexp): ")))
   (when regexp
     (detached-list-narrow-sessions
-     `((,(concat "Annotation: " regexp) .
+     `(,@detached-list--narrow-criteria
+       (,(concat "Annotation: " regexp) .
         ,(lambda (sessions)
            (seq-filter (lambda (it)
                          (when-let ((annotation (detached--session-annotation it)))
                            (string-match regexp annotation)))
-                       sessions)))
-       ,@detached-list--narrow-criteria))))
+                       sessions)))))))
 
 (defun detached-list-narrow-local ()
   "Narrow to local sessions."
   (interactive)
   (detached-list-narrow-sessions
-   `(("Local" .
+   `(,@detached-list--narrow-criteria
+     ("Local" .
       ,(lambda (sessions)
-         (seq-filter #'detached--local-session-p sessions)))
-     ,@detached-list--narrow-criteria)))
+         (seq-filter #'detached--local-session-p sessions))))))
 
 (defun detached-list-narrow-remote ()
   "Narrow to remote sessions."
   (interactive)
   (detached-list-narrow-sessions
-   `(("Remote" .
+   `(,@detached-list--narrow-criteria
+     ("Remote" .
       ,(lambda (sessions)
-         (seq-filter #'detached--remote-session-p sessions)))
-     ,@detached-list--narrow-criteria)))
+         (seq-filter #'detached--remote-session-p sessions))))))
 
 (defun detached-list-select-filter ()
   "Select filter from `detached-list-filter' to apply."
@@ -382,54 +480,54 @@ Optionally SUPPRESS-OUTPUT."
        origins))))
   (when origin
     (detached-list-narrow-sessions
-     `((,(concat "Origin: " origin) .
+     `(,@detached-list--narrow-criteria
+       (,(concat "Origin: " origin) .
         ,(lambda (sessions)
            (seq-filter
             (lambda (it)
               (string-match origin
                             (symbol-name (detached--session-origin it))))
-              sessions)))
-       ,@detached-list--narrow-criteria))))
+              sessions)))))))
 
 (defun detached-list-narrow-active ()
   "Narrow to active sessions."
   (interactive)
   (detached-list-narrow-sessions
-   `(("Active" .
+   `(,@detached-list--narrow-criteria
+     ("Active" .
       ,(lambda (sessions)
-         (seq-filter #'detached--active-session-p sessions)))
-     ,@detached-list--narrow-criteria)))
+         (seq-filter #'detached--active-session-p sessions))))))
 
 (defun detached-list-narrow-inactive ()
   "Narrow to inactive sessions."
   (interactive)
   (detached-list-narrow-sessions
-   `(("Inactive" .
+   `(,@detached-list--narrow-criteria
+     ("Inactive" .
       ,(lambda (sessions)
-         (seq-remove #'detached--active-session-p sessions)))
-     ,@detached-list--narrow-criteria)))
+         (seq-remove #'detached--active-session-p sessions))))))
 
 (defun detached-list-narrow-success ()
   "Narrow to successful sessions."
   (interactive)
   (detached-list-narrow-sessions
-   `(("Success" .
+   `(,@detached-list--narrow-criteria
+     ("Success" .
       ,(lambda (sessions)
          (seq-filter (lambda (it)
                        (eq 'success (car (detached--session-status it))))
-                     sessions)))
-     ,@detached-list--narrow-criteria)))
+                     sessions))))))
 
 (defun detached-list-narrow-failure ()
   "Narrow to failed sessions."
   (interactive)
   (detached-list-narrow-sessions
-   `(("Failure" .
+   `(,@detached-list--narrow-criteria
+     ("Failure" .
       ,(lambda (sessions)
          (seq-filter (lambda (it)
                        (eq 'failure (car (detached--session-status it))))
-                     sessions)))
-     ,@detached-list--narrow-criteria)))
+                     sessions))))))
 
 (defun detached-list-mark-regexp (regexp)
   "Mark sessions which command match REGEXP.
@@ -659,12 +757,42 @@ If prefix-argument is provided unmark instead of mark."
 
 (defun detached-list--status-str (session)
   "Return a string representation of SESSION's status."
-  (let ((status (detached-session-status session)))
-    (symbol-name status)))
+  (let* ((status (detached-session-status session))
+         (status-str
+          (if (detached--active-session-p session)
+              (alist-get 'active detached-list-state-symbols "?")
+            (if (eq status 'failure)
+                (alist-get 'failure detached-list-state-symbols "?")
+              (alist-get 'success detached-list-state-symbols "?"))))
+         (status-face
+          (cond ((and (detached--uninitialized-session-p session)
+                      (detached--active-session-p session))
+                 'detached-identifier-face)
+                ((detached--active-session-p session) 'font-lock-type-face)
+                ((eq status 'failure) 'detached-failure-face)
+                ((eq status 'success) 'detached-state-face)
+                (t 'detached-identifier-face)))
+         (attach-str
+          (cond ((eq 'create-and-attach (detached--session-initial-mode session))
+                 (alist-get 'initially-attached detached-list-state-symbols "?"))
+                ((eq 'create (detached--session-initial-mode session))
+                 (alist-get 'initially-detached detached-list-state-symbols "?"))
+                (t "?")))
+         (initial-mode-face
+          (cond ((eq 'create-and-attach (detached--session-initial-mode session)) 'detached-identifier-face)
+                ((eq 'create (detached--session-initial-mode session)) 'detached-identifier-face)
+                (t "?"))))
+    (string-join
+     `(,(propertize status-str 'face status-face)
+       ,(propertize attach-str 'face initial-mode-face))
+     " ")))
 
-(defun detached-list--state-str (session)
-  "Return a string representation of SESSION's state."
-  (symbol-name (detached--session-state session)))
+(defun detached-list--command-str (session)
+  "Return command string for SESSION."
+  (let ((command-str (detached--session-command session)))
+    (if (detached--uninitialized-session-p session)
+        (propertize command-str 'face 'detached-uninitialized-face)
+      command-str)))
 
 (defun detached-list--get-marked-or-current-sessions ()
   "Return a list of relevant sessions."
@@ -741,19 +869,25 @@ If prefix-argument is provided unmark instead of mark."
     (define-key map (kbd "j") #'imenu)
     (define-key map (kbd "k") #'detached-list-kill-session)
     (define-key map (kbd "m") #'detached-list-mark-session)
-    (define-key map (kbd "n a") #'detached-list-narrow-active)
-    (define-key map (kbd "n h") #'detached-list-narrow-host)
-    (define-key map (kbd "n f") #'detached-list-narrow-failure)
-    (define-key map (kbd "n i") #'detached-list-narrow-inactive)
-    (define-key map (kbd "n l") #'detached-list-narrow-local)
-    (define-key map (kbd "n o") #'detached-list-narrow-origin)
-    (define-key map (kbd "n r") #'detached-list-narrow-remote)
-    (define-key map (kbd "n s") #'detached-list-narrow-success)
+    ;; Narrow
+    (define-key map (kbd "n a") #'detached-list-narrow-annotation)
+    (define-key map (kbd "n c") #'detached-list-narrow-command)
+    (define-key map (kbd "n d") #'detached-list-narrow-session-directory)
+    ;; Host
+    (define-key map (kbd "n h h") #'detached-list-narrow-host)
+    (define-key map (kbd "n h l") #'detached-list-narrow-local)
+    (define-key map (kbd "n h r") #'detached-list-narrow-remote)
+    (define-key map (kbd "n o") #'detached-list-narrow-output)
+    (define-key map (kbd "n O") #'detached-list-narrow-origin)
+    ;; State
+    (define-key map (kbd "n s a") #'detached-list-narrow-active)
+    (define-key map (kbd "n s f") #'detached-list-narrow-failure)
+    (define-key map (kbd "n s i") #'detached-list-narrow-inactive)
+    (define-key map (kbd "n s s") #'detached-list-narrow-success)
+    (define-key map (kbd "n u") #'detached-list-narrow-unique)
+    (define-key map (kbd "n w") #'detached-list-narrow-working-directory)
     (define-key map (kbd "n +") #'detached-list-narrow-after-time)
     (define-key map (kbd "n -") #'detached-list-narrow-before-time)
-    (define-key map (kbd "n /") #'detached-list-narrow-output-regexp)
-    (define-key map (kbd "n % a") #'detached-list-narrow-annotation-regexp)
-    (define-key map (kbd "n % c") #'detached-list-narrow-regexp)
     (define-key map (kbd "q") #'detached-list-quit)
     (define-key map (kbd "r") #'detached-list-rerun-session)
     (define-key map (kbd "t") #'detached-list-toggle-mark-session)
@@ -779,7 +913,6 @@ If prefix-argument is provided unmark instead of mark."
   (if detached-list--narrow-criteria
       (string-join
        (thread-last detached-list--narrow-criteria
-                    (seq-reverse)
                     (seq-map #'car))
        " > ")
     ""))
