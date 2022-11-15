@@ -38,7 +38,7 @@
     (:name "Host" :function detached--host-str :length 15 :face detached-host-face)
     (:name "Directory" :function detached--working-dir-str :length 40 :face detached-working-dir-face)
     (:name "Metadata" :function detached--metadata-str :length 30 :face detached-metadata-face)
-    (:name "Duration" :function detached--duration-str :length 20 :face detached-duration-face)
+    (:name "Duration" :function detached--duration-str :length 10 :face detached-duration-face)
     (:name "Created" :function detached--creation-str :length 20 :face detached-creation-face))
   "Configuration for `detached' list mode."
   :type '(repeat (plist :options ((:name symbol)
@@ -70,7 +70,7 @@ detached list implements."
   :type '(alist :key-type string))
 
 (defcustom detached-list-session-identifier-function
-  #'detached-list-session-identifier
+  #'detached-session-identifier
   "The function to use for identifying a session."
   :group 'detached
   :type 'sexp)
@@ -114,15 +114,19 @@ detached list implements."
                     ,(detached--session-command session))))
         (string-join (seq-remove #'null strs) "\n")))))
 
-(defun detached-list-session-identifier (session)
-  "Return a string identifier for SESSION."
-  (string-join
-   `(,(detached--session-command session)
-     ,(detached--host-str session)
-     ,(detached--session-directory session))
-   ", "))
-
 ;;;; Commands
+
+(defun detached-list-describe-duration (session)
+  "Describe the SESSION's duration statistics."
+  (interactive
+   (list (detached--get-session major-mode)))
+  (let ((mean (detached-session-mean-duration session))
+        (std (detached-session-std-duration session)))
+    (message "%s: %s %s: %s"
+             (propertize "μ" 'face 'detached-mark-face)
+             (if mean (detached--duration-str2 mean) "-")
+             (propertize "σ" 'face 'detached-mark-face)
+             (if std (detached--duration-str2 std) "-"))))
 
 (defun detached-list-initialize-session-directory (&optional all)
   "Initialize a session-directory.
@@ -624,8 +628,8 @@ If prefix-argument is provided unmark instead of mark."
            (lambda (session)
              (seq-find
               (lambda (marked-session)
-                (eq (detached--session-id marked-session)
-                    (detached--session-id session)))
+                (eq (detached-session-id marked-session)
+                    (detached-session-id session)))
               detached-list--marked-sessions))
            sessions)))
     (setq detached-list--marked-sessions unmarked-sessions)
@@ -735,18 +739,18 @@ If prefix-argument is provided unmark instead of mark."
 (defun detached-list--marked-session-p (session)
   "Return t if SESSION is marked."
   (seq-find (lambda (it)
-              (eq (detached--session-id it)
-                  (detached--session-id session)))
+              (eq (detached-session-id it)
+                  (detached-session-id session)))
             detached-list--marked-sessions))
 
 (defun detached-list--attached-p (session)
   "Return t if Emacs is attached to SESSION."
-  (let ((id (detached--session-id session)))
+  (let ((id (detached-session-id session)))
     (seq-find
      (lambda (buffer)
        (with-current-buffer buffer
          (when-let ((buffer-session detached--buffer-session)
-                    (buffer-session-id (detached--session-id buffer-session)))
+                    (buffer-session-id (detached-session-id buffer-session)))
            (eq buffer-session-id id))))
      (buffer-list))))
 
@@ -756,8 +760,8 @@ If prefix-argument is provided unmark instead of mark."
     (tabulated-list-put-tag " ")
     (setq detached-list--marked-sessions
           (seq-remove (lambda (it)
-                        (eq (detached--session-id it)
-                            (detached--session-id session)))
+                        (eq (detached-session-id it)
+                            (detached-session-id session)))
                       detached-list--marked-sessions))))
 
 (defun detached-list--mark-session (session)
@@ -881,7 +885,7 @@ If prefix-argument is provided unmark instead of mark."
                        (seq-remove #'null)
                        (seq-map #'file-name-sans-extension))))
     (seq-filter (lambda (it)
-                  (member (symbol-name (detached--session-id it)) session-ids))
+                  (member (symbol-name (detached-session-id it)) session-ids))
                 sessions)))
 
 ;;;; Major mode
@@ -931,7 +935,9 @@ If prefix-argument is provided unmark instead of mark."
     (define-key map (kbd "=") #'detached-list-diff-marked-sessions)
     (define-key map (kbd "-") #'detached-list-widen)
     (define-key map (kbd "!") #'detached-shell-command)
-    (define-key map (kbd ".") #'detached-describe-session)
+    ;; Describe
+    (define-key map (kbd ". s") #'detached-describe-session)
+    (define-key map (kbd ". d") #'detached-list-describe-duration)
     (define-key map (kbd "<backspace>") #'detached-list-remove-narrow-criterion)
     (define-key map (kbd "<return>") #'detached-list-open-session)
     map)

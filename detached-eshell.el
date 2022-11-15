@@ -35,8 +35,8 @@
 
 (defcustom detached-eshell-session-action
   '(:attach detached-shell-command-attach-session
-            :view detached-view-dwim
-            :run detached-shell-command)
+			:view detached-view-dwim
+			:run detached-shell-command)
   "Actions for a session created with `detached-eshell'."
   :group 'detached
   :type 'plist)
@@ -45,15 +45,15 @@
 
 ;;;###autoload
 (defun detached-eshell-external-command (orig-fun &rest args)
-  "Advice `eshell-external-command' to optionally use `detached'."
+  "Advice ORIG-FUN to optionally use `detached' on ARGS."
   (let* ((detached-session-action detached-eshell-session-action)
-         (command (string-trim-right (string-join (flatten-list args) " ")))
-         (session (detached-create-session command))
-         (command (detached--shell-command session)))
-    (advice-remove #'eshell-external-command #'detached-eshell-external-command)
-    (setq detached--buffer-session session)
-    (setq detached-enabled nil)
-    (apply orig-fun `(,(seq-first command) ,(seq-rest command)))))
+		 (command (string-trim-right (string-join (flatten-list args) " ")))
+		 (session (detached-create-session command))
+		 (command (detached--shell-command session)))
+	(advice-remove #'eshell-external-command #'detached-eshell-external-command)
+	(setq detached--buffer-session session)
+	(setq detached-enabled nil)
+	(apply orig-fun `(,(seq-first command) ,(seq-rest command)))))
 
 ;;;; Commands
 
@@ -63,18 +63,18 @@
 If prefix-argument directly DETACH from the session."
   (interactive "P")
   (let* ((detached-session-origin 'eshell)
-         (detached-session-mode (if detach 'create 'create-and-attach))
-         (detached-enabled t)
-         (detached--current-session nil))
-    (advice-add #'eshell-external-command :around #'detached-eshell-external-command)
-    (call-interactively #'eshell-send-input)))
+		 (detached-session-mode (if detach 'create 'create-and-attach))
+		 (detached-enabled t)
+		 (detached--current-session nil))
+	(advice-add #'eshell-external-command :around #'detached-eshell-external-command)
+	(call-interactively #'eshell-send-input)))
 
 (defun detached-eshell-attach-session (session)
   "Attach to SESSION."
   (interactive
    (list (detached-eshell--select-session)))
   (when (detached-valid-session session)
-    (if (eq 'active (detached--determine-session-state session))
+    (if (detached-session-active-p session)
         (cl-letf* ((detached-session-mode 'attach)
                    (input
                     (detached--shell-command session t))
@@ -108,12 +108,12 @@ If prefix-argument directly DETACH from the session."
           (thread-last (detached-get-sessions)
                        (seq-filter (lambda (it)
                                      (string= (detached-session-host-name it) host-name)))
-                       (seq-filter (lambda (it) (eq 'active (detached--determine-session-state it)))))))
+                       (seq-filter #'detached-session-active-p))))
     (detached-completing-read sessions)))
 
 (cl-defmethod detached--detach-session ((_mode (derived-mode eshell-mode)))
   "Detach from session when MODE is `eshell-mode'."
-  (when-let ((active-session (eq 'active (detached--determine-session-state detached--buffer-session)))
+  (when-let ((active-session (detached-session-active-p detached--buffer-session))
              (dtach-process (detached-eshell--get-dtach-process)))
     (setq detached--buffer-session nil)
     (process-send-string dtach-process
@@ -123,11 +123,11 @@ If prefix-argument directly DETACH from the session."
 
 (defvar detached-eshell-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "<S-return>") #'detached-eshell-send-input)
-    (define-key map (kbd "<C-return>") #'detached-eshell-attach-session)
-    (define-key map (kbd "C-c C-.") #'detached-describe-session)
-    (define-key map (kbd detached-detach-key) #'detached-detach-session)
-    map)
+	(define-key map (kbd "<S-return>") #'detached-eshell-send-input)
+	(define-key map (kbd "<C-return>") #'detached-eshell-attach-session)
+	(define-key map (kbd "C-c C-.") #'detached-describe-session)
+	(define-key map (kbd detached-detach-key) #'detached-detach-session)
+	map)
   "Keymap for `detached-eshell-mode'.")
 
 ;;;###autoload
@@ -135,14 +135,14 @@ If prefix-argument directly DETACH from the session."
   "Integrate `detached' in `eshell-mode'."
   :lighter " detached-eshell"
   :keymap (let ((map (make-sparse-keymap)))
-            map)
+			map)
   (make-local-variable 'eshell-preoutput-filter-functions)
   (if detached-eshell-mode
-      (progn
-        (add-hook 'eshell-preoutput-filter-functions #'detached--env-message-filter)
-        (add-hook 'eshell-preoutput-filter-functions #'detached--dtach-eof-message-filter))
-    (remove-hook 'eshell-preoutput-filter-functions #'detached--env-message-filter)
-    (remove-hook 'eshell-preoutput-filter-functions #'detached--dtach-eof-message-filter)))
+	  (progn
+		(add-hook 'eshell-preoutput-filter-functions #'detached--env-message-filter)
+		(add-hook 'eshell-preoutput-filter-functions #'detached--dtach-eof-message-filter))
+	(remove-hook 'eshell-preoutput-filter-functions #'detached--env-message-filter)
+	(remove-hook 'eshell-preoutput-filter-functions #'detached--dtach-eof-message-filter)))
 
 (provide 'detached-eshell)
 

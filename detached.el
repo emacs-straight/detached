@@ -310,6 +310,9 @@ This version is encoded as [package-version].[revision].")
 
 ;;;;; Private
 
+(defvar detached--session-durations nil
+  "An hash-table with duration sessions.")
+
 (defvar detached--sessions-initialized nil
   "Sessions are initialized.")
 
@@ -427,9 +430,9 @@ Optionally SUPPRESS-OUTPUT if prefix-argument is provided."
     (let ((initialized-session (detached--get-initialized-session session)))
       (if (detached-session-active-p initialized-session)
           (detached-attach-session initialized-session)
-        (if-let ((view-fun (plist-get (detached--session-action initialized-session) :view)))
-            (funcall view-fun initialized-session)
-          (detached-view-dwim initialized-session))))))
+        (funcall
+         (detached-session-view-function initialized-session)
+         initialized-session)))))
 
 ;;;###autoload
 (defun detached-compile-session (session)
@@ -480,9 +483,7 @@ The session is compiled by opening its output and enabling
             (read-string "Edit command: " (detached--session-command session))))
       (if suppress-output
           (detached-start-session command suppress-output)
-        (if-let ((run-fun (plist-get (detached--session-action session) :run)))
-            (funcall run-fun command)
-          (detached-start-session command))))))
+        (funcall (detached-session-run-function session) command)))))
 
 ;;;###autoload
 (defun detached-rerun-session (session &optional suppress-output)
@@ -500,9 +501,7 @@ The session is compiled by opening its output and enabling
            (command (detached--session-command session)))
       (if suppress-output
           (detached-start-session command suppress-output)
-        (if-let ((run-fun (plist-get (detached--session-action session) :run)))
-            (funcall run-fun command)
-          (detached-start-session command))))))
+        (funcall (detached-session-run-function session) command)))))
 
 (defun detached-describe-session ()
   "Describe current session."
@@ -527,9 +526,8 @@ The session is compiled by opening its output and enabling
     (let ((initialized-session (detached--get-initialized-session session)))
       (if (detached-session-inactive-p initialized-session)
           (detached-open-session initialized-session)
-        (if-let ((attach-fun (plist-get (detached--session-action initialized-session) :attach)))
-            (funcall attach-fun initialized-session)
-          (detached-shell-command-attach-session initialized-session))))))
+        (funcall (detached-session-attach-function initialized-session)
+                 initialized-session)))))
 
 ;;;###autoload
 (defun detached-copy-session (session)
@@ -539,7 +537,7 @@ The session is compiled by opening its output and enabling
   (when (detached-valid-session session)
     (with-temp-buffer
       (insert (detached-session-output session))
-      (when (eq 'terminal-data (detached--session-env session))
+      (when (detached-session-terminal-data-p session)
         ;; Enable `detached-log-mode' to parse ansi-escape sequences
         (detached-log-mode))
       (kill-new (buffer-string)))))
@@ -565,7 +563,7 @@ The session is compiled by opening its output and enabling
   (interactive
    (list (detached-completing-read (detached-get-sessions))))
   (when (detached-valid-session session)
-    (if (eq 'active (detached--determine-session-state session))
+    (if (detached-session-active-p session)
         (message "Kill session first before removing it.")
       (detached--db-remove-entry session))))
 
@@ -624,7 +622,7 @@ Optionally DELETE the session if prefix-argument is provided."
           (erase-buffer)
           (insert (detached--session-header session1))
           (insert (detached-session-output session1))
-          (when (eq 'terminal-data (detached--session-env session1))
+          (when (detached-session-terminal-data-p session1)
             ;; Enable `detached-log-mode' to parse ansi-escape sequences
             (detached-log-mode))))
       (with-current-buffer (get-buffer-create buffer2)
@@ -632,7 +630,7 @@ Optionally DELETE the session if prefix-argument is provided."
           (erase-buffer)
           (insert (detached--session-header session2))
           (insert (detached-session-output session2))
-          (when (eq 'terminal-data (detached--session-env session2))
+          (when (detached-session-terminal-data-p session2)
             ;; Enable `detached-log-mode' to parse ansi-escape sequences
             (detached-log-mode))))
       (ediff-buffers buffer1 buffer2))))
@@ -803,9 +801,12 @@ Optionally SUPPRESS-OUTPUT."
           (let* ((sessions (detached--db-get-sessions))
                  (ht (make-hash-table :test #'equal :size (length sessions))))
             (seq-do (lambda (session)
-                      (puthash (detached--session-id session) 'uninitialized ht))
+                      (puthash (detached-session-id session) 'uninitialized ht))
                     sessions)
             ht))
+
+    ;; Hash sessions and their duration times
+    (detached--initialize-sessions-duration-hashtable)
 
     ;; Initialize accessible sessions
     (let ((detached--current-emacsen (detached--active-detached-emacsen)))
@@ -921,10 +922,10 @@ This function uses the `notifications' library."
         (buffer-substring beginning end)))))
 
 (defun detached-session-pid (session)
-  "Return SESSION's pid."
+  "Return SESSION's process id."
   (let* ((socket
           (expand-file-name
-           (concat (symbol-name (detached--session-id session)) ".socket")
+           (concat (symbol-name (detached-session-id session)) ".socket")
            (or
             (file-remote-p default-directory 'localname)
             default-directory))))
@@ -934,6 +935,12 @@ This function uses the `notifications' library."
         (apply #'process-file `("pgrep" nil t nil "-f" ,(shell-quote-argument (format "dtach -. %s" socket))))
         (buffer-string))
       "\n" t))))
+
+(defun detached-session-state (session)
+  "Return SESSION's state."
+  (if (detached-session-validated-p session)
+      (detached--session-state session)
+    'unknown))
 
 (defun detached-session-status (session)
   "Return status for SESSION."
@@ -962,6 +969,20 @@ This function uses the `notifications' library."
        (detached--session-time session) :duration)
     (- (time-to-seconds) (detached-session-start-time session))))
 
+(defun detached-session-mean-duration (session)
+  "Return SESSION's mean duration."
+  (when-let* ((duration-statistics
+               (gethash (detached-session-identifier session)
+                        detached--session-durations nil)))
+    (plist-get duration-statistics :mean)))
+
+(defun detached-session-std-duration (session)
+  "Return SESSION's std duration."
+  (when-let* ((duration-statistics
+               (gethash (detached-session-identifier session)
+                        detached--session-durations nil)))
+    (plist-get duration-statistics :std)))
+
 (defun detached-session-host-type (session)
   "Return the type of SESSION's host."
   (pcase-let ((`(,_name . ,type)
@@ -973,6 +994,54 @@ This function uses the `notifications' library."
   (pcase-let ((`(,_status . ,exit-code)
                (detached--session-status session)))
     exit-code))
+
+(defun detached-session-id (session)
+  "Return SESSION's id."
+  (detached--session-id session))
+
+(defun detached-session-identifier (session)
+  "Return SESSION's identifier string."
+  (string-join
+   `(,(detached--session-command session)
+     ,(detached--host-str session)
+     ,(detached--session-directory session))
+   ", "))
+
+(defun detached-session-view-function (session)
+  "Return SESSION's view function."
+  (or
+   (plist-get (detached--session-action session) :view)
+   #'detached-view-dwim))
+
+(defun detached-session-attach-function (session)
+  "Return SESSION's attach function."
+  (or
+   (plist-get (detached--session-action session) :attach)
+   #'detached-shell-command-attach-session))
+
+(defun detached-session-run-function (session)
+  "Return SESSION's run function."
+  (or
+   (plist-get (detached--session-action session) :run)
+   #'detached-start-session))
+
+(defun detached-session-callback-function (session)
+  "Return SESSION's callback function."
+  (or
+   (plist-get (detached--session-action session) :callback)
+   #'ignore))
+
+(defun detached-session-status-function (session)
+  "Return SESSION's status function."
+  (or
+   (plist-get (detached--session-action session) :status)
+   #'detached-session-exit-code-status))
+
+(defun detached-session-validated-p (session)
+  "Return t if SESSION has been validated."
+  (not
+   (alist-get (detached-session-id session)
+              detached--unvalidated-sessions)))
 
 (defun detached-session-failed-p (session)
   "Return t if SESSION failed."
@@ -988,11 +1057,11 @@ This function uses the `notifications' library."
 
 (defun detached-session-active-p (session)
   "Return t if SESSION is active."
-  (eq 'active (detached--session-state session)))
+  (eq 'active (detached-session-state session)))
 
 (defun detached-session-inactive-p (session)
   "Return t if SESSION is inactive."
-  (eq 'inactive (detached--session-state session)))
+  (eq 'inactive (detached-session-state session)))
 
 (defun detached-session-degraded-p (session)
   "Return t if SESSION is degraded."
@@ -1005,12 +1074,17 @@ This function uses the `notifications' library."
 (defun detached-session-uninitialized-p (session)
   "Return t if SESSION is uninitialized."
   (eq 'uninitialized
-      (gethash (detached--session-id session) detached--hashed-sessions)))
+      (gethash (detached-session-id session) detached--hashed-sessions)))
 
 (defun detached-session-initialized-p (session)
   "Return t if SESSION is initialized."
   (eq 'initialized
-      (gethash (detached--session-id session) detached--hashed-sessions)))
+      (gethash (detached-session-id session) detached--hashed-sessions)))
+
+(defun detached-session-terminal-data-p (session)
+  "Return t if SESSION is run with environment set to terminal data."
+  (eq 'terminal-data
+      (detached--session-env session)))
 
 (defun detached-session-watched-p (session)
   "Return t if SESSION is being watched."
@@ -1203,7 +1277,7 @@ Optionally CONCAT the command return command into a string."
    `(,(format "Command: %s" (detached--session-command session))
      ,(format "Working directory: %s" (detached--working-dir-str session))
      ,(format "Host: %s" (detached-session-host-name session))
-     ,(format "Id: %s" (symbol-name (detached--session-id session)))
+     ,(format "Id: %s" (symbol-name (detached-session-id session)))
      ,(format "Status: %s" (detached-session-status session))
      ,(format "Annotation: %s" (if-let ((annotation (detached--session-annotation session))) annotation ""))
      ,(format "Exit-code: %s" (detached-session-exit-code session))
@@ -1246,15 +1320,15 @@ It can take some time for a dtach socket to be created.  Therefore all
 sessions are created with state unknown.  This function creates a
 function to verify that a session was created correctly.  If the
 session is missing its deleted from the database."
-  (setf (alist-get (detached--session-id session) detached--unvalidated-sessions)
+  (setf (alist-get (detached-session-id session) detached--unvalidated-sessions)
         session)
   (run-with-timer detached-dtach-socket-creation-delay
                   nil
                   (lambda ()
-                    (when (alist-get (detached--session-id session)
+                    (when (alist-get (detached-session-id session)
                                      detached--unvalidated-sessions)
                       (setq detached--unvalidated-sessions
-                            (assq-delete-all (detached--session-id session)
+                            (assq-delete-all (detached-session-id session)
                                              detached--unvalidated-sessions))
                       (unless (detached--session-missing-p session)
                         (setf (detached--session-state session) 'active)
@@ -1267,7 +1341,7 @@ Optionally make the path LOCAL to host."
   (let* ((file-name
           (concat
            (symbol-name
-            (detached--session-id session))
+            (detached-session-id session))
            (pcase file
              ('socket ".socket")
              ('log ".log"))))
@@ -1332,7 +1406,7 @@ Optionally make the path LOCAL to host."
 
 (defun detached--detach-from-comint-process ()
   "Detach from the underlying `comint' process."
-  (when-let ((active-session (eq 'active (detached--determine-session-state detached--buffer-session)))
+  (when-let ((active-session (detached-session-active-p detached--buffer-session))
              (dtach-process (get-buffer-process (current-buffer))))
     (setq detached--buffer-session nil)
     (comint-simple-send dtach-process detached--dtach-detach-character)))
@@ -1344,6 +1418,35 @@ Optionally make the path LOCAL to host."
     (if (= (length (window-list)) 1)
         (kill-buffer)
       (kill-buffer-and-window))))
+
+(defun detached--initialize-sessions-duration-hashtable ()
+  "Initialize the `detached--session-durations'."
+  (let* ((sessions (detached-get-sessions))
+         (grouped-sessions
+          (thread-last sessions
+                       (seq-filter #'detached-session-inactive-p)
+                       (seq-remove #'detached-session-failed-p)
+                       (seq-group-by #'detached-session-identifier))))
+    (setq detached--session-durations
+          (make-hash-table :test #'equal :size (seq-length grouped-sessions)))
+    (thread-last grouped-sessions
+                 (seq-do (lambda (it)
+                           (pcase-let* ((`(,identifier . ,sessions) it))
+                             (puthash identifier
+                                      (detached--get-duration-statistics sessions)
+                                      detached--session-durations)))))))
+
+(defun detached--get-duration-statistics (sessions)
+  "Return a plist of duration statistics for SESSIONS."
+  (let* ((durations (seq-map #'detached-session-duration sessions))
+         (mean (/ (seq-reduce #'+ durations 0) (seq-length durations)))
+         (std (sqrt (/ (seq-reduce (lambda (sum duration)
+                                     (+ sum (* (- duration mean)
+                                               (- duration mean))))
+                                   durations
+                                   0.0)
+                       (seq-length durations)))))
+    `(:durations ,durations :mean ,mean :std ,std)))
 
 ;;;;; Database
 
@@ -1369,7 +1472,7 @@ Optionally make the path LOCAL to host."
 
 (defun detached--db-insert-entry (session)
   "Insert SESSION into `detached--sessions' and update database."
-  (push `(,(detached--session-id session) . ,session) detached--sessions)
+  (push `(,(detached-session-id session) . ,session) detached--sessions)
   (when detached--update-database
     (detached--db-update-sessions)))
 
@@ -1379,13 +1482,13 @@ Optionally make the path LOCAL to host."
     (when (file-exists-p log)
       (delete-file log)))
   (setq detached--sessions
-        (assq-delete-all (detached--session-id session) detached--sessions))
+        (assq-delete-all (detached-session-id session) detached--sessions))
   (when detached--update-database
     (detached--db-update-sessions)))
 
 (defun detached--db-update-entry (session)
   "Update SESSION in `detached--sessions' and the database."
-  (setf (alist-get (detached--session-id session) detached--sessions) session)
+  (setf (alist-get (detached-session-id session) detached--sessions) session)
   (when detached--update-database
     (detached--db-update-sessions)))
 
@@ -1468,7 +1571,7 @@ Optionally make the path LOCAL to host."
       (progn
         (detached--initialize-session session)
         (detached--db-update-sessions)
-        (detached--db-get-session (detached--session-id session)))
+        (detached--db-get-session (detached-session-id session)))
     session))
 
 (defun detached--verify-db-compatibility ()
@@ -1519,8 +1622,7 @@ Optionally specify if the end-time should be APPROXIMATE or not."
                        (file-attributes
                         (detached--session-file session 'log))))
         (session-time (detached--update-session-time session approximate))
-        (status-fun (or (plist-get (detached--session-action session) :status)
-                        #'detached-session-exit-code-status)))
+        (status-fun (detached-session-status-function session)))
     (setf (detached--session-size session) session-size)
     (setf (detached--session-time session) session-time)
     (setf (detached--session-state session) 'inactive)
@@ -1533,8 +1635,8 @@ Optionally specify if the end-time should be APPROXIMATE or not."
   (detached--db-update-entry session)
 
   ;; Execute callback
-  (when-let ((callback (plist-get (detached--session-action session) :callback)))
-    (funcall callback session)))
+  (funcall (detached-session-callback-function session)
+           session))
 
 (defun detached--kill-processes (pid)
   "Kill PID and all of its children."
@@ -1566,7 +1668,7 @@ If SESSION is degraded fallback to a command that doesn't rely on tee."
          (command
           (shell-quote-argument
            (format "if %s; then true; else echo \"[detached-exit-code: $?]\"; fi"
-                   (if (and (eq 'terminal-data (detached--session-env session))
+                   (if (and (detached-session-terminal-data-p session)
                             detached-terminal-data-command)
                        (format "TERM=eterm-color %s"
                                (format
@@ -1680,7 +1782,7 @@ session and trigger a state transition."
 
 (defun detached--initialize-session (session)
   "Initialize SESSION."
-  (puthash (detached--session-id session) 'initialized detached--hashed-sessions)
+  (puthash (detached-session-id session) 'initialized detached--hashed-sessions)
 
   (let* ((emacsen
           (thread-last `(,(emacs-pid) ,@(detached--session-initialized-emacsen session))
@@ -1718,9 +1820,9 @@ If event is cased by an update to the `detached' database, re-initialize
       (detached--db-initialize)
       ;; Initialize unknown sessions
       (seq-do (lambda (session)
-                (unless (gethash (detached--session-id session) detached--hashed-sessions)
+                (unless (gethash (detached-session-id session) detached--hashed-sessions)
                   (if (not (detached--session-accessible-p session))
-                      (puthash (detached--session-id session) 'uninitialized detached--hashed-sessions)
+                      (puthash (detached-session-id session) 'uninitialized detached--hashed-sessions)
                     (detached--initialize-session session))))
               (detached--db-get-sessions)))))
 
@@ -1778,7 +1880,11 @@ start searching at NUMBER offset."
 
 (defun detached--duration-str (session)
   "Return SESSION's duration time."
-  (let* ((duration (round (detached-session-duration session)))
+  (detached--duration-str2 (detached-session-duration session)))
+
+(defun detached--duration-str2 (duration)
+  "Return propertized DURATION."
+  (let* ((duration (round duration))
          (hours (/ duration 3600))
          (minutes (/ (mod duration 3600) 60))
          (seconds (mod duration 60)))
@@ -1808,7 +1914,7 @@ start searching at NUMBER offset."
 
 (defun detached--state-str (session)
   "Return string based on SESSION state."
-  (pcase (detached--session-state session)
+  (pcase (detached-session-state session)
     ('active (if (detached--session-accessible-p session)
                  "*"
                "?"))
