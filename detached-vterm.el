@@ -48,22 +48,21 @@
 
 ;;;; Commands
 
-(defun detached-vterm-send-input (&optional detach)
-  "Create a `detached' session.
-
-Optionally DETACH from it."
+(defun detached-vterm-send-input (&optional detached)
+  "Start a `detached-session' and attach to it, unless DETACHED."
   (interactive)
   (let* ((input (buffer-substring-no-properties (vterm-beginning-of-line) (vterm-end-of-line)))
 		 (detached-session-origin 'vterm)
 		 (detached-session-action detached-vterm-session-action)
 		 (detached-session-mode
-		  (if detach 'create 'create-and-attach))
-		 (detached--current-session (detached-create-session input))
-		 (command (detached--shell-command detached--current-session t)))
+		  (if detached 'detached 'attached))
+		 (detached-current-session (detached-create-session input))
+		 (command (detached-session-start-command detached-current-session
+                                                  :type 'string)))
 	(vterm-send-C-a)
 	(vterm-send-C-k)
 	(process-send-string vterm--process command)
-	(setq detached--buffer-session detached--current-session)
+	(setq detached-buffer-session detached-current-session)
 	(vterm-send-C-e)
 	(vterm-send-return)))
 
@@ -78,9 +77,11 @@ Optionally DETACH from it."
                                        (string= (detached-session-host-name it) host-name)))
                          (seq-filter #'detached-session-active-p))))
       (detached-completing-read sessions))))
-  (let ((detached-session-mode 'attach))
-	(setq detached--buffer-session session)
-	(process-send-string vterm--process (detached--shell-command session t))
+  (let ((command
+         (detached-session-attach-command session
+                                          :type 'string)))
+	(setq detached-buffer-session session)
+	(process-send-string vterm--process command)
 	(vterm-send-return)))
 
 (cl-defmethod detached--detach-session ((_mode (derived-mode vterm-mode)))

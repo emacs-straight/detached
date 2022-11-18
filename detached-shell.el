@@ -58,12 +58,12 @@ This function also makes sure that the HISTFILE is disabled for local shells."
 
 ;;;; Commands
 
-(defun detached-shell-send-input (&optional detach)
-  "Create a session and attach to it unless DETACH."
+(defun detached-shell-send-input (&optional detached)
+  "Start a `detached-session' and attach to it, unless DETACHED."
   (interactive "P")
   (let* ((detached-session-origin 'shell)
          (detached-session-action detached-shell-session-action)
-         (detached-session-mode (if detach 'create 'create-and-attach))
+         (detached-session-mode (if detached 'detached 'attached))
          (comint-input-sender #'detached-shell--create-input-sender))
     (comint-send-input)))
 
@@ -73,13 +73,13 @@ This function also makes sure that the HISTFILE is disabled for local shells."
 `comint-add-to-input-history' is temporarily disabled to avoid
 cluttering the `comint-history' with dtach commands."
   (interactive
-   (list (detached-shell--select-session)))
+   (list (detached-select-host-session)))
   (when (detached-valid-session session)
     (if (detached-session-active-p session)
-        (cl-letf ((detached--current-session session)
+        (cl-letf ((detached-current-session session)
                   (comint-input-sender #'detached-shell--attach-input-sender)
                   ((symbol-function 'comint-add-to-input-history) (lambda (_) t)))
-          (setq detached--buffer-session session)
+          (setq detached-buffer-session session)
           (let ((kill-ring nil))
             (comint-kill-input))
           (insert "[attached]")
@@ -88,21 +88,11 @@ cluttering the `comint-history' with dtach commands."
 
 ;;;; Support functions
 
-(defun detached-shell--select-session ()
-  "Return selected session."
-  (let* ((host-name (car (detached--host)))
-         (sessions
-          (thread-last (detached-get-sessions)
-                       (seq-filter (lambda (it)
-                                     (string= (detached-session-host-name it) host-name)))
-                       (seq-filter #'detached-session-active-p))))
-    (detached-completing-read sessions)))
-
 (defun detached-shell--attach-input-sender (proc _string)
   "Attach to `detached--session' and send the attach command to PROC."
-  (let* ((detached-session-mode 'attach)
-         (input
-          (detached--shell-command detached--current-session t)))
+  (let* ((input
+          (detached-session-attach-command detached-current-session
+                                           :type 'string)))
     (comint-simple-send proc input)))
 
 (defun detached-shell--create-input-sender (proc string)
@@ -110,8 +100,9 @@ cluttering the `comint-history' with dtach commands."
   (with-connection-local-variables
    (let* ((session
            (detached-create-session (substring-no-properties string)))
-          (command (detached--shell-command session t)))
-     (setq detached--buffer-session session)
+          (command
+           (detached-session-start-command session :type 'string)))
+     (setq detached-buffer-session session)
      (comint-simple-send proc command))))
 
 (defun detached-shell--comint-read-input-ring-advice (orig-fun &rest args)

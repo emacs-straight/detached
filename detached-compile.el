@@ -35,7 +35,7 @@
 (defcustom detached-compile-session-action
   '(:attach detached-compile-attach
 			:view detached-compile-session
-			:run detached-compile)
+			:run detached-compile-start-session)
   "Actions for a session created with `detached-compile'."
   :group 'detached
   :type 'plist)
@@ -57,8 +57,7 @@ Optionally enable COMINT if prefix-argument is provided."
 		 (detached-session-origin (or detached-session-origin 'compile))
 		 (detached-session-action (or detached-session-action
 									  detached-compile-session-action))
-		 (detached-session-mode (or detached-session-mode 'create-and-attach))
-		 (detached--current-session (detached-create-session command)))
+		 (detached-session-mode (or detached-session-mode 'attached)))
 	(compile command comint)))
 
 ;;;###autoload
@@ -66,17 +65,21 @@ Optionally enable COMINT if prefix-argument is provided."
   "Re-compile by running `compile' but in a 'detached' session.
 Optionally EDIT-COMMAND."
   (interactive "P")
-  (let* ((detached-enabled t)
-		 (detached-session-action detached-compile-session-action)
-		 (detached-session-origin 'compile)
-		 (detached-session-mode 'create-and-attach)
-		 (detached--current-session edit-command))
-	(recompile edit-command)))
+  (detached-with-session detached-buffer-session
+    (let* ((detached-enabled t)
+		   (detached-session-mode 'attached)
+           (detached-session-command
+            (if edit-command
+                (compilation-read-command
+                 (detached-session-command detached-buffer-session))
+              (detached-session-command detached-buffer-session)))
+           (detached-current-session (detached-create-session detached-session-command)))
+      (apply #'compilation-start `(,detached-session-command)))))
 
 (defun detached-compile-kill ()
   "Kill a 'detached' session."
   (interactive)
-  (detached-kill-session detached--buffer-session))
+  (detached-kill-session detached-buffer-session))
 
 ;;;;; Functions
 
@@ -84,12 +87,16 @@ Optionally EDIT-COMMAND."
 (defun detached-compile-attach (session)
   "Attach to SESSION with `compile'."
   (when (detached-valid-session session)
-    (let* ((detached-enabled t)
-           (detached-session-mode 'attach)
-           (detached--current-session session)
-           (detached-local-session (detached--session-local session))
-           (default-directory (detached--session-directory session)))
-      (compilation-start (detached--session-command session)))))
+    (detached-with-session session
+      (let* ((detached-enabled t))
+        (compilation-start detached-session-command)))))
+
+;;;###autoload
+(defun detached-compile-start-session (session)
+  "Start SESSION with `detached-compile'."
+  (detached-with-session session
+    (let* ((detached-enabled t))
+      (detached-compile detached-session-command))))
 
 ;;;;; Support functions
 
@@ -97,9 +104,9 @@ Optionally EDIT-COMMAND."
 (defun detached-compile--start (_)
   "Run in `compilation-start-hook' if `detached-enabled'."
   (when detached-enabled
-    (setq-local default-directory (detached--session-working-directory detached--current-session))
-    (setq detached--buffer-session detached--current-session)
-    (setq compile-command (detached--session-command detached--current-session))
+    (setq-local default-directory (detached-session-working-directory detached-current-session))
+    (setq detached-buffer-session detached-current-session)
+    (setq compile-command (detached-session-command detached-current-session))
     (setq compilation-arguments nil)
     (detached-compile--replace-modesetter)
     (when detached-filter-ansi-sequences
@@ -110,13 +117,23 @@ Optionally EDIT-COMMAND."
 (defun detached-compile--compilation-start (compilation-start &rest args)
   "Create a `detached' session before running COMPILATION-START with ARGS."
   (if detached-enabled
-	  (pcase-let ((`(,_command ,mode ,name-function ,highlight-regexp) args))
-		(if (eq detached-session-mode 'create)
-			(detached-start-detached-session detached--current-session)
-		  (apply compilation-start `(,(detached--shell-command detached--current-session t)
-									 ,(or mode 'detached-compilation-mode)
-									 ,name-function
-									 ,highlight-regexp))))
+	  (pcase-let* ((`(,command ,mode ,name-function ,highlight-regexp) args)
+                   (detached-session-environment
+                    (or detached-session-environment
+                        `(:compilation-args ,(list (or mode 'detached-compilation-mode)
+                                                   name-function
+                                                   highlight-regexp))))
+                   (detached-current-session
+                    (or detached-current-session
+                        (detached-create-session command))))
+		(if (eq detached-session-mode 'detached)
+            (detached-start-session detached-current-session)
+		  (apply compilation-start `(,(if (detached-session-started-p detached-current-session)
+                                          (detached-session-attach-command detached-current-session
+                                                                           :type 'string)
+                                        (detached-session-start-command detached-current-session
+                                                                        :type 'string))
+                                     ,@(detached-session-environment-property detached-current-session :compilation-args)))))
 	(apply compilation-start args)))
 
 (defun detached-compile--replace-modesetter ()
@@ -127,7 +144,7 @@ Optionally EDIT-COMMAND."
 	  (goto-char (point-min))
 	  (when (re-search-forward regexp nil t)
 		(delete-region (match-beginning 0) (match-end 0))
-		(insert (detached--session-command detached--current-session))))))
+		(insert (detached-session-command detached-current-session))))))
 
 (defun detached-compile--compilation-detached-filter ()
   "Filter to modify the output in a compilation buffer."

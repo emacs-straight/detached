@@ -36,7 +36,7 @@
 (declare-function detached-rerun-session "detached")
 (declare-function detached-view-session "detached")
 (declare-function detached-copy-session-command "detached")
-(declare-function detached-copy-session "detached")
+(declare-function detached-copy-session-output "detached")
 (declare-function detached-diff-session "detached")
 (declare-function detached-initialize-sessions "detached")
 (declare-function detached-shell-mode "detached")
@@ -78,7 +78,7 @@
   :group 'detached
   :type 'list)
 
-(defvar detached-action-map
+(defvar detached-embark-action-map
   (let ((map (make-sparse-keymap)))
 	(define-key map "a" #'detached-attach-session)
 	(define-key map "c" #'detached-compile-session)
@@ -89,7 +89,7 @@
 	(define-key map "r" #'detached-rerun-session)
 	(define-key map "v" #'detached-view-session)
 	(define-key map "w" #'detached-copy-session-command)
-	(define-key map "W" #'detached-copy-session)
+	(define-key map "W" #'detached-copy-session-output)
 	(define-key map "=" #'detached-diff-session)
 	map))
 
@@ -166,7 +166,7 @@
 (defun detached-init--embark ()
   "Initialize integration with `embark'."
   (with-eval-after-load 'embark
-	(defvar embark-detached-map (make-composed-keymap detached-action-map embark-general-map))
+	(defvar embark-detached-map (make-composed-keymap detached-embark-action-map embark-general-map))
 	(add-to-list 'embark-keymap-alist '(detached . embark-detached-map))))
 
 (defun detached-init--nano-modeline ()

@@ -49,35 +49,35 @@
   (let* ((detached-session-action detached-eshell-session-action)
 		 (command (string-trim-right (string-join (flatten-list args) " ")))
 		 (session (detached-create-session command))
-		 (command (detached--shell-command session)))
+		 (command
+          (detached-session-start-command session
+                                          :type 'list)))
 	(advice-remove #'eshell-external-command #'detached-eshell-external-command)
-	(setq detached--buffer-session session)
+	(setq detached-buffer-session session)
 	(setq detached-enabled nil)
 	(apply orig-fun `(,(seq-first command) ,(seq-rest command)))))
 
 ;;;; Commands
 
-(defun detached-eshell-send-input (&optional detach)
-  "Create a session and attach to it.
-
-If prefix-argument directly DETACH from the session."
+(defun detached-eshell-send-input (&optional detached)
+  "Start a `detached-session' and attach to it, unless DETACHED."
   (interactive "P")
   (let* ((detached-session-origin 'eshell)
-		 (detached-session-mode (if detach 'create 'create-and-attach))
+		 (detached-session-mode (if detached 'detached 'attached))
 		 (detached-enabled t)
-		 (detached--current-session nil))
+		 (detached-current-session nil))
 	(advice-add #'eshell-external-command :around #'detached-eshell-external-command)
 	(call-interactively #'eshell-send-input)))
 
 (defun detached-eshell-attach-session (session)
   "Attach to SESSION."
   (interactive
-   (list (detached-eshell--select-session)))
+   (list (detached-select-host-session)))
   (when (detached-valid-session session)
     (if (detached-session-active-p session)
-        (cl-letf* ((detached-session-mode 'attach)
-                   (input
-                    (detached--shell-command session t))
+        (cl-letf* ((input
+                    (detached-session-attach-command session
+                                                     :type 'string))
                    ((symbol-function #'eshell-add-to-history) #'ignore))
           (let ((kill-ring nil))
             (eshell-kill-input))
@@ -89,7 +89,7 @@ If prefix-argument directly DETACH from the session."
             (overlay-put (make-overlay begin end) 'invisible t)
             (overlay-put (make-overlay end end) 'before-string "[attached]")
             (insert " "))
-          (setq detached--buffer-session session)
+          (setq detached-buffer-session session)
           (call-interactively #'eshell-send-input))
       (detached-open-session session))))
 
@@ -101,21 +101,11 @@ If prefix-argument directly DETACH from the session."
     (and (string= (process-name process) "dtach")
          process)))
 
-(defun detached-eshell--select-session ()
-  "Return selected session."
-  (let* ((host-name (car (detached--host)))
-         (sessions
-          (thread-last (detached-get-sessions)
-                       (seq-filter (lambda (it)
-                                     (string= (detached-session-host-name it) host-name)))
-                       (seq-filter #'detached-session-active-p))))
-    (detached-completing-read sessions)))
-
 (cl-defmethod detached--detach-session ((_mode (derived-mode eshell-mode)))
   "Detach from session when MODE is `eshell-mode'."
-  (when-let ((active-session (detached-session-active-p detached--buffer-session))
+  (when-let ((active-session (detached-session-active-p detached-buffer-session))
              (dtach-process (detached-eshell--get-dtach-process)))
-    (setq detached--buffer-session nil)
+    (setq detached-buffer-session nil)
     (process-send-string dtach-process
                          detached--dtach-detach-character)))
 

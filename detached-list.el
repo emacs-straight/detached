@@ -100,7 +100,7 @@ detached list implements."
     (goto-char (point-min))
     (while (not (eobp))
       (let ((session (tabulated-list-get-id)))
-        (push `(,(detached--session-command session) . ,(point))
+        (push `(,(detached-session-command session) . ,(point))
               index))
       (forward-line 1))
     (seq-reverse index)))
@@ -111,7 +111,7 @@ detached list implements."
     (when (detached-session-p session)
       (let ((strs `(,(when-let  ((annotation (detached--session-annotation session)))
                        (propertize annotation 'face 'detached-annotation-face))
-                    ,(detached--session-command session))))
+                    ,(detached-session-command session))))
         (string-join (seq-remove #'null strs) "\n")))))
 
 ;;;; Commands
@@ -119,7 +119,7 @@ detached list implements."
 (defun detached-list-describe-duration (session)
   "Describe the SESSION's duration statistics."
   (interactive
-   (list (detached--get-session major-mode)))
+   (list (detached-session-in-context)))
   (let ((mean (detached-session-mean-duration session))
         (std (detached-session-std-duration session)))
     (message "%s: %s %s: %s"
@@ -136,24 +136,13 @@ Optionally initialize ALL session-directories."
   (if-let* ((uninitialized-directories
              (thread-last (detached-get-sessions)
                           (seq-filter #'detached-session-uninitialized-p)
-                          (seq-map #'detached--session-directory)
+                          (seq-map #'detached-session-directory)
                           (seq-uniq))))
       (if all
           (seq-do #'detached-list--initialize-directory uninitialized-directories)
         (when-let ((directory (completing-read "Initialize directory: " uninitialized-directories)))
           (detached-list--initialize-directory directory)))
     (message "All session directories have been initialized")))
-
-(defun detached-list-edit-annotation (session)
-  "Edit SESSION's annotation."
-  (interactive
-   (list (tabulated-list-get-id)))
-  (when-let* ((initial-value (or
-                              (detached--session-annotation session)
-                              ""))
-              (annotation (read-string "Annotation: " initial-value)))
-    (setf (detached--session-annotation session) annotation)
-    (detached--db-update-entry session)))
 
 (defun detached-list-quit ()
   "Quit command."
@@ -192,18 +181,6 @@ Optionally initialize ALL session-directories."
    (list (tabulated-list-get-id)))
   (detached-open-session-directory session))
 
-(defun detached-list-copy-session-command (session)
-  "Copy SESSION at point's command."
-  (interactive
-   (list (tabulated-list-get-id)))
-  (detached-copy-session-command session))
-
-(defun detached-list-copy-session-output (session)
-  "Copy SESSION at point's output."
-  (interactive
-   (list (tabulated-list-get-id)))
-  (detached-copy-session session))
-
 (defun detached-list-kill-session ()
   "Send a TERM signal to sessions at point, or all marked sessions.
 
@@ -222,7 +199,7 @@ Optionally DELETE the session if prefix-argument is provided."
 (defun detached-list-view-session (session)
   "View SESSION."
   (interactive
-   (list (detached--get-session major-mode)))
+   (list (detached-session-in-context)))
   (let ((detached-open-session-display-buffer-action
          detached-list-open-session-display-buffer-action))
     (detached-view-dwim session)))
@@ -236,31 +213,31 @@ Optionally TOGGLE-SUPPRESS-OUTPUT."
          current-prefix-arg))
   (let ((detached-session-mode
          (if toggle-suppress-output
-             (if (eq 'create (detached--session-initial-mode session))
-                 'create-and-attach
-               'create)
+             (if (eq 'detached (detached--session-initial-mode session))
+                 'attached
+               'detached)
            (detached--session-initial-mode session))))
-    (unless (eq detached-session-mode 'create)
+    (unless (eq detached-session-mode 'detached)
       (when-let ((single-window (> (length (window-list)) 1))
                  (buffer (current-buffer)))
         (delete-window (get-buffer-window))
         (bury-buffer buffer)))
     (detached-edit-and-run-session session)))
 
-(defun detached-list-rerun-session (session &optional toggle-suppress-output)
+(defun detached-list-rerun-session (session &optional toggle-session-mode)
   "Rerun SESSION at point.
 
-Optionally TOGGLE-SUPPRESS-OUTPUT."
+Optionally TOGGLE-SESSION-MODE."
   (interactive
    (list (tabulated-list-get-id)
          current-prefix-arg))
   (let ((detached-session-mode
-         (if toggle-suppress-output
-             (if (eq 'create (detached--session-initial-mode session))
-                 'create-and-attach
-               'create)
+         (if toggle-session-mode
+             (if (eq 'attached (detached--session-initial-mode session))
+                 'attached
+               'detached)
            (detached--session-initial-mode session))))
-    (unless (eq detached-session-mode 'create)
+    (unless (eq detached-session-mode 'detached)
       (when-let ((single-window (> (length (window-list)) 1))
                  (buffer (current-buffer)))
         (delete-window (get-buffer-window))
@@ -383,8 +360,8 @@ Optionally TOGGLE-SUPPRESS-OUTPUT."
    (list
     (if current-prefix-arg
         (regexp-quote
-         (detached--session-command
-          (detached--get-session major-mode)))
+         (detached-session-command
+          (detached-session-in-context)))
       (read-regexp
        "Filter session commands containing (regexp): "))))
   (when regexp
@@ -394,7 +371,7 @@ Optionally TOGGLE-SUPPRESS-OUTPUT."
         ,(lambda (sessions)
            (seq-filter (lambda (it)
                          (string-match regexp
-                                       (detached--session-command it)))
+                                       (detached-session-command it)))
                        sessions)))))))
 
 (defun detached-list-narrow-working-directory (regexp)
@@ -403,8 +380,8 @@ Optionally TOGGLE-SUPPRESS-OUTPUT."
    (list
     (if current-prefix-arg
         (regexp-quote
-         (detached--session-working-directory
-          (detached--get-session major-mode)))
+         (detached-session-working-directory
+          (detached-session-in-context)))
       (read-regexp
        "Filter session working directories containing (regexp): "))))
   (when regexp
@@ -414,7 +391,7 @@ Optionally TOGGLE-SUPPRESS-OUTPUT."
         ,(lambda (sessions)
            (seq-filter (lambda (it)
                          (string-match regexp
-                                       (detached--session-working-directory it)))
+                                       (detached-session-working-directory it)))
                        sessions)))))))
 
 (defun detached-list-narrow-session-directory (session-directory)
@@ -423,7 +400,7 @@ Optionally TOGGLE-SUPPRESS-OUTPUT."
    (list
     (when-let* ((directories
                  (thread-last (detached-list--get-narrowed-sessions)
-                              (seq-map #'detached--session-directory)
+                              (seq-map #'detached-session-directory)
                               (seq-uniq))))
       (completing-read
        "Select session directory: "
@@ -435,7 +412,7 @@ Optionally TOGGLE-SUPPRESS-OUTPUT."
         ,(lambda (sessions)
            (seq-filter (lambda (it)
                          (string-match session-directory
-                                       (detached--session-directory it)))
+                                       (detached-session-directory it)))
                        sessions)))))))
 
 (defun detached-list-narrow-annotation (regexp)
@@ -570,7 +547,7 @@ If prefix-argument is provided unmark instead of mark."
     (goto-char (point-min))
     (while (not (eobp))
       (let ((session (tabulated-list-get-id)))
-        (when (string-match regexp (detached--session-command session))
+        (when (string-match regexp (detached-session-command session))
           (if current-prefix-arg
               (detached-list--unmark-session session)
             (detached-list--mark-session session))))
@@ -668,7 +645,8 @@ If prefix-argument is provided unmark instead of mark."
     (setq tabulated-list-entries
           (seq-map #'detached-list--get-entry
                    (detached-list--get-narrowed-sessions)))
-    (tabulated-list-print t)))
+    (tabulated-list-print t)
+    (detached-list-revert)))
 
 ;;;; Support functions
 
@@ -684,7 +662,7 @@ If prefix-argument is provided unmark instead of mark."
 (defun detached-list--initialize-directory (directory)
   "Initialize sessions in DIRECTORY."
   (thread-last (detached-get-sessions)
-               (seq-filter (lambda (it) (string= directory (detached--session-directory it))))
+               (seq-filter (lambda (it) (string= directory (detached-session-directory it))))
                (seq-do #'detached--initialize-session)))
 
 (defun detached--list-parse-time (time)
@@ -749,7 +727,7 @@ If prefix-argument is provided unmark instead of mark."
     (seq-find
      (lambda (buffer)
        (with-current-buffer buffer
-         (when-let ((buffer-session detached--buffer-session)
+         (when-let ((buffer-session detached-buffer-session)
                     (buffer-session-id (detached-session-id buffer-session)))
            (eq buffer-session-id id))))
      (buffer-list))))
@@ -804,14 +782,14 @@ If prefix-argument is provided unmark instead of mark."
                 ((eq status 'success) 'detached-state-face)
                 (t 'detached-identifier-face)))
          (attach-str
-          (cond ((eq 'create-and-attach (detached--session-initial-mode session))
+          (cond ((eq 'attached (detached--session-initial-mode session))
                  (alist-get 'initially-attached detached-list-state-symbols "?"))
-                ((eq 'create (detached--session-initial-mode session))
+                ((eq 'detached (detached--session-initial-mode session))
                  (alist-get 'initially-detached detached-list-state-symbols "?"))
                 (t "?")))
          (initial-mode-face
-          (cond ((eq 'create-and-attach (detached--session-initial-mode session)) 'detached-identifier-face)
-                ((eq 'create (detached--session-initial-mode session)) 'detached-identifier-face)
+          (cond ((eq 'attached (detached--session-initial-mode session)) 'detached-identifier-face)
+                ((eq 'detached (detached--session-initial-mode session)) 'detached-identifier-face)
                 (t "?"))))
     (string-join
      `(,(propertize status-str 'face status-face)
@@ -820,7 +798,7 @@ If prefix-argument is provided unmark instead of mark."
 
 (defun detached-list--command-str (session)
   "Return command string for SESSION."
-  (let ((command-str (detached--session-command session)))
+  (let ((command-str (detached-session-command session)))
     (if (detached-session-uninitialized-p session)
         (propertize command-str 'face 'detached-uninitialized-face)
       command-str)))
@@ -839,7 +817,7 @@ If prefix-argument is provided unmark instead of mark."
             detached-list--narrow-criteria)
     sessions))
 
-(cl-defmethod detached--get-session ((_mode (derived-mode detached-list-mode)))
+(cl-defmethod detached--session-in-context ((_mode (derived-mode detached-list-mode)))
   "Return session when in `detached-list-mode'."
   (tabulated-list-get-id))
 
@@ -847,7 +825,7 @@ If prefix-argument is provided unmark instead of mark."
   "Return a narrowed list with SESSIONS containing REGEXP."
   (let* ((sessions-and-directories
           (thread-last sessions
-                       (seq-group-by #'detached--session-directory)
+                       (seq-group-by #'detached-session-directory)
                        (seq-filter (lambda (it)
                                      ;; Filter out only accessible directories
                                      (or (not (file-remote-p (car it)))
@@ -892,9 +870,9 @@ If prefix-argument is provided unmark instead of mark."
 
 (defvar detached-list-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "a") #'detached-list-edit-annotation)
+    (define-key map (kbd "a") #'detached-edit-session-annotation)
     (define-key map (kbd "d") #'detached-list-delete-session)
-    (define-key map (kbd "e") #'detached-list-edit-and-run-session)
+    (define-key map (kbd "e") #'detached-edit-and-run-session)
     (define-key map (kbd "f") #'detached-list-select-filter)
     (define-key map (kbd "g") #'detached-list-revert)
     (define-key map (kbd "i") #'detached-list-initialize-session-directory)
@@ -922,14 +900,14 @@ If prefix-argument is provided unmark instead of mark."
     (define-key map (kbd "n +") #'detached-list-narrow-after-time)
     (define-key map (kbd "n -") #'detached-list-narrow-before-time)
     (define-key map (kbd "q") #'detached-list-quit)
-    (define-key map (kbd "r") #'detached-list-rerun-session)
+    (define-key map (kbd "r") #'detached-rerun-session)
     (define-key map (kbd "t") #'detached-list-toggle-mark-session)
     (define-key map (kbd "T") #'detached-list-toggle-sessions)
     (define-key map (kbd "u") #'detached-list-unmark-session)
     (define-key map (kbd "U") #'detached-list-unmark-sessions)
     (define-key map (kbd "v") #'detached-list-view-session)
-    (define-key map (kbd "w") #'detached-list-copy-session-command)
-    (define-key map (kbd "W") #'detached-list-copy-session-output)
+    (define-key map (kbd "w") #'detached-copy-session-command)
+    (define-key map (kbd "W") #'detached-copy-session-output)
     (define-key map (kbd "x") #'detached-list-detach-from-session)
     (define-key map (kbd "%") #'detached-list-mark-regexp)
     (define-key map (kbd "=") #'detached-list-diff-marked-sessions)

@@ -68,6 +68,13 @@
 
 ;;;;; Session interface
 
+(ert-deftest detached-test-session-started-p ()
+  (detached-test--with-temp-database
+   (cl-letf* ((session (detached-create-session "foo")))
+     (should (not (detached-session-started-p session)))
+     (setf (detached--session-state session) 'active)
+     (should (detached-session-started-p session)))))
+
 (ert-deftest detached-test-session-status ()
   (let ((failed-session (detached--session-create :status `(failure . 128))))
     (should (detached-session-failed-p failed-session))
@@ -87,23 +94,40 @@
 
 ;;;;; Other
 
- (ert-deftest detached-test-tail-command ()
-   (detached-test--with-temp-database
-    (cl-letf* ((detached-tail-program "tail")
-               (session (detached-create-session "ls -la"))
-               (detached-show-session-context t)
-               (detached-session-context-lines 20)
-               ((symbol-function #'detached-create-session)
-                (lambda (_)
-                  session)))
-      (let* ((log (detached--session-file session 'log t))
-             (expected `(,detached-tail-program
-                         "-F" "-n" ,(number-to-string detached-session-context-lines)
-                         ,log))
-             (expected-concat (string-join expected " ")))
-        (let ((detached-session-mode 'create-and-attach))
-          (should (equal expected (detached--tail-command session)))
-          (should (equal expected-concat (detached--tail-command session t))))))))
+;; (ert-deftest detached-test-session-start-command ()
+;;   (detached-test--with-temp-database
+;;    (cl-letf* ((detached-tail-program "tail")
+;;               (detached-dtach-program "dtach")
+;;               (detached-shell-program "bash")
+;;               (detached-show-session-context t)
+;;               (detached-session-context-lines 20))
+
+;;      ;; ;; Create and attach
+;;      ;; (let* ((session (detached-create-session "ls -la"))
+;;      ;;        (log (detached--session-file session 'log t))
+;;      ;;        (expected-list `(,detached-tail-program
+;;      ;;                         "-F"
+;;      ;;                         "-n" ,(number-to-string detached-session-context-lines)
+;;      ;;                         ,log)))
+;;      ;;   (setf (detached--session-initial-mode session) 'attached)
+;;      ;;   (should (equal expected-list (detached-session-start-command session
+;;      ;;                                                                :type 'list))))
+
+;;      ;; Create and attach to degraded session
+;;      (let* ((detached-degraded-commands '("ls"))
+;;             (session (detached-create-session "ls -la"))
+;;             (log (detached--session-file session 'log t))
+;;             (expected-list `(,detached-tail-program
+;;                              "-F"
+;;                              "-n" ,(number-to-string detached-session-context-lines)
+;;                              ,log)))
+;;        (setf (detached--session-initial-mode session) 'attached)
+;;        (should (equal expected-list (detached-session-start-command session
+;;                                                                     :type 'list))))
+
+;;      ;; Create
+
+;;      )))
 
 (ert-deftest detached-test-dtach-command ()
   (detached-test--with-temp-database
@@ -119,7 +143,7 @@
 			  ((symbol-function #'detached--detached-command)
 			   (lambda (_)
 				 (format "{ detached-command }"))))
-	 (let* ((detached-session-mode 'create-and-attach)
+	 (let* ((detached-session-mode 'attached)
 			(expected `(,detached-dtach-program
 						"-c" ,(detached--session-file session 'socket t)
 						"-z" ,detached-shell-program
@@ -214,9 +238,9 @@
 			  `(,session1 ,session3))))))
 
 (ert-deftest detached-test-dtach-arg ()
-  (let ((detached-session-mode 'create))
+  (let ((detached-session-mode 'detached))
 	(should (string= "-n" (detached--dtach-arg))))
-  (let ((detached-session-mode 'create-and-attach))
+  (let ((detached-session-mode 'attached))
 	(should (string= "-c" (detached--dtach-arg))))
   (let ((detached-session-mode 'attach))
 	(should (string= "-a" (detached--dtach-arg))))
@@ -259,14 +283,14 @@
 								   :working-directory "/home/user/"
 								   :command "ls -la"
 								   :degraded nil
-								   :env 'terminal-data
+								   :text-mode 'terminal-data
 								   :id 'foo123))
 		(degraded-plain-text-session
 		 (detached--session-create :directory "/tmp/detached/"
 								   :working-directory "/home/user/"
 								   :command "ls -la"
 								   :degraded t
-								   :env 'plain-text
+								   :text-mode 'plain-text
 								   :id 'foo123)))
 	(should (string= "{ bash -c if\\ TERM\\=eterm-color\\ script\\ --quiet\\ --flush\\ --return\\ --command\\ \\\"ls\\ -la\\\"\\ /dev/null\\;\\ then\\ true\\;\\ else\\ echo\\ \\\"\\[detached-exit-code\\:\\ \\$\\?\\]\\\"\\;\\ fi; } 2>&1 | tee /tmp/detached/foo123.log"
 					 (detached--detached-command terminal-data-session)))
