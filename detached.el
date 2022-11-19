@@ -752,12 +752,11 @@ active session.  For sessions created with `detached-compile' or
                                     :metadata (detached-metadata)
                                     :state 'unknown
                                     :initialized-emacsen `(,(emacs-pid)))))
-     (detached--create-session-validator session)
-     (detached--watch-session-directory (detached-session-directory session))
      session)))
 
 (defun detached--start-session-process (session start-command)
   "Start SESSION with START-COMMAND."
+  (detached-register-session session)
   (if (detached--session-local-p session)
       (apply #'start-process-shell-command `("detached" nil ,start-command))
     (apply #'start-file-process-shell-command `("detached" nil ,start-command))))
@@ -913,6 +912,7 @@ This function uses the `notifications' library."
   (let* ((inhibit-message t))
     (detached-with-session session
       (cl-letf* (((symbol-function #'set-process-sentinel) #'ignore)
+                 (detached-session-mode 'attached)
                  (buffer (get-buffer-create detached--shell-command-buffer))
                  (default-directory (detached-session-directory session))
                  (command (detached-session-attach-command session :type 'string)))
@@ -926,17 +926,19 @@ This function uses the `notifications' library."
 (defun detached-start-shell-command-session (session)
   "Start SESSION as a `shell-command'."
   (cl-letf* ((inhibit-message t)
+             (default-directory (if (detached--session-local-p session)
+                                    (detached-session-directory session)
+                                  (detached-session-working-directory session)))
              ((symbol-function #'set-process-sentinel) #'ignore)
              (buffer (detached--generate-buffer detached--shell-command-buffer
                                                 (lambda (buffer)
                                                   (not (get-buffer-process buffer)))))
              (command (detached-session-start-command session
                                                       :type 'string)))
+    (detached-register-session session)
     (funcall #'async-shell-command command buffer)
     (with-current-buffer buffer
       (setq detached-buffer-session session))))
-
-;;;;; Public session functions
 
 (defun detached-start-session (session)
   "Start SESSION."
@@ -948,8 +950,16 @@ This function uses the `notifications' library."
     (detached-with-session session
       (funcall (detached-session-run-function session) session))))
 
+(defun detached-register-session (session)
+  "Register the existence of SESSION and start monitoring it."
+  (detached--create-session-validator session)
+  (detached--watch-session-directory (detached-session-directory session)))
+
+;;;;; Public session functions
+
 (cl-defun detached-session-start-command (session &key type)
   "Return command to start SESSION with specified TYPE."
+  (detached-register-session session)
   (detached-connection-local-variables
    (let* ((socket (detached--session-file session 'socket t))
           (detached-session-mode (detached--session-initial-mode session))
@@ -1109,7 +1119,7 @@ This function uses the `notifications' library."
   (string-join
    `(,(detached-session-command session)
      ,(detached--host-str session)
-     ,(detached-session-directory session))
+     ,(detached-session-working-directory session))
    ", "))
 
 (defun detached-session-view-function (session)
@@ -1800,6 +1810,7 @@ log to deduce the end time."
 If event is caused by the deletion of a socket, locate the related
 session and trigger a state transition."
   (pcase-let* ((`(,_ ,action ,file) event))
+    ;; Session becomes inactive
     (when (and (eq action 'deleted)
                (string= "socket" (file-name-extension file)))
 
@@ -1829,7 +1840,23 @@ session and trigger a state transition."
           (file-notify-rm-watch
            (alist-get session-directory detached--watched-session-directories nil nil #'string=))
           (setq detached--watched-session-directories
-                (assoc-delete-all session-directory detached--watched-session-directories)))))))
+                (assoc-delete-all session-directory detached--watched-session-directories)))))
+
+    ;; Session becomes active
+    (when (and (eq action 'created)
+               (string= "log" (file-name-extension file)))
+      (when-let* ((id (intern (file-name-base file)))
+                  (session
+                   (or (alist-get id detached--unvalidated-sessions)
+                       (detached--db-get-session id)))
+                  (session-directory (detached-session-directory session))
+                  (is-primary
+                   (detached--primary-detached-emacs-p session)))
+        (setq detached--unvalidated-sessions
+              (assq-delete-all (detached-session-id session)
+                               detached--unvalidated-sessions))
+        (setf (detached--session-state session) 'active)
+        (detached--db-insert-entry session)))))
 
 (defun detached--initialize-session (session)
   "Initialize SESSION."

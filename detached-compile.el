@@ -88,15 +88,15 @@ Optionally EDIT-COMMAND."
   "Attach to SESSION with `compile'."
   (when (detached-valid-session session)
     (detached-with-session session
-      (let* ((detached-enabled t))
-        (compilation-start detached-session-command)))))
+      (let* ((detached-enabled t)
+             (detached-session-mode 'attached))
+        (compilation-start `(,detached-session-command))))))
 
 ;;;###autoload
 (defun detached-compile-start-session (session)
   "Start SESSION with `detached-compile'."
   (detached-with-session session
-    (let* ((detached-enabled t))
-      (detached-compile detached-session-command))))
+    (detached-compile detached-session-command)))
 
 ;;;;; Support functions
 
@@ -125,10 +125,17 @@ Optionally EDIT-COMMAND."
                                                    highlight-regexp))))
                    (detached-current-session
                     (or detached-current-session
-                        (detached-create-session command))))
+                        (detached-create-session command)))
+                   (default-directory (if (detached--session-local-p detached-current-session)
+                                          (detached-session-directory detached-current-session)
+                                        (detached-session-working-directory detached-current-session))))
 		(if (eq detached-session-mode 'detached)
-            (detached-start-session detached-current-session)
-		  (apply compilation-start `(,(if (detached-session-started-p detached-current-session)
+            (detached--start-session-process detached-current-session
+                                             (detached-session-start-command
+                                              detached-current-session
+                                              :type 'string))
+          (detached-register-session detached-current-session)
+          (apply compilation-start `(,(if (detached-session-started-p detached-current-session)
                                           (detached-session-attach-command detached-current-session
                                                                            :type 'string)
                                         (detached-session-start-command detached-current-session
