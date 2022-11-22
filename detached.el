@@ -232,6 +232,7 @@ If set to a non nil value the latest entry to
     (define-key map "a" #'detached-edit-session-annotation)
     (define-key map "d" #'detached-detach-session)
     (define-key map "e" #'detached-edit-and-run-session)
+    (define-key map "k" #'detached-kill-session)
     (define-key map "r" #'detached-rerun-session)
     (define-key map "w" #'detached-copy-session-command)
     (define-key map "W" #'detached-copy-session-output)
@@ -347,8 +348,8 @@ This version is encoded as [package-version].[revision].")
 (defvar detached--hashed-sessions nil
   "Hashed sessions.")
 
-(defvar detached--unvalidated-sessions nil
-  "List of unvalidated sessions.")
+(defvar detached--unvalidated-session-ids nil
+  "A list of unvalidated session ids.")
 
 (defvar detached--current-emacsen nil
   "List of current detached Emacsen.")
@@ -576,7 +577,8 @@ Optionally TOGGLE-SESSION-MODE."
   "Attach to SESSION."
   (interactive
    (list (detached-session-in-context)))
-  (when session
+  (when (and session
+             (detached--valid-dtach-executable-p session))
     (let ((initialized-session (detached--get-initialized-session session)))
       (if (detached-session-inactive-p initialized-session)
           (detached-open-session initialized-session)
@@ -627,7 +629,7 @@ Optionally TOGGLE-SESSION-MODE."
 
 Optionally DELETE the session if prefix-argument is provided."
   (interactive
-   (list (detached-completing-read (detached-get-sessions))
+   (list (detached-session-in-context)
          current-prefix-arg))
   (when (detached-valid-session session)
     (when-let* ((default-directory (detached-session-directory session))
@@ -740,7 +742,7 @@ active session.  For sessions created with `detached-compile' or
                                     :working-directory (detached--get-working-directory)
                                     :degraded (detached-degraded-command-p command)
                                     :initial-mode detached-session-mode
-                                    :time `(:start ,(time-to-seconds (current-time)) :end 0.0 :duration 0.0 :offset 0.0)
+                                    :time `(:start 0.0 :end 0.0 :duration 0.0 :offset 0.0)
                                     :status '(unknown . 0)
                                     :annotation detached-session-annotation
                                     :local detached-local-session
@@ -752,6 +754,7 @@ active session.  For sessions created with `detached-compile' or
                                     :metadata (detached-metadata)
                                     :state 'unknown
                                     :initialized-emacsen `(,(emacs-pid)))))
+     (detached--db-insert-entry session)
      session)))
 
 (defun detached--start-session-process (session start-command)
@@ -942,83 +945,88 @@ This function uses the `notifications' library."
 
 (defun detached-start-session (session)
   "Start SESSION."
-  (if (eq 'detached (detached--session-initial-mode session))
-      (detached--start-session-process session
-                                       (detached-session-start-command
-                                        session
-                                        :type 'string))
-    (detached-with-session session
-      (funcall (detached-session-run-function session) session))))
+  (when (detached--valid-dtach-executable-p session)
+    (if (eq 'detached (detached--session-initial-mode session))
+        (detached--start-session-process session
+                                         (detached-session-start-command
+                                          session
+                                          :type 'string))
+      (detached-with-session session
+        (funcall (detached-session-run-function session) session)))))
 
 (defun detached-register-session (session)
   "Register the existence of SESSION and start monitoring it."
-  (detached--create-session-validator session)
+  (setf (detached--session-time session) `(:start ,(time-to-seconds (current-time)) :end 0.0 :duration 0.0 :offset 0.0))
+  (setf (detached--session-state session) 'started)
+  (detached--db-update-entry session)
   (detached--watch-session-directory (detached-session-directory session)))
 
 ;;;;; Public session functions
 
 (cl-defun detached-session-start-command (session &key type)
   "Return command to start SESSION with specified TYPE."
-  (detached-register-session session)
-  (detached-connection-local-variables
-   (let* ((socket (detached--session-file session 'socket t))
-          (detached-session-mode (detached--session-initial-mode session))
-          (log (detached--session-file session 'log t))
-          (dtach-arg (if (eq 'detached (detached--session-initial-mode session))
-                         "-n"
-                       "-c"))
-          (dtach-command-fun (lambda (session)
-                               (let ((detached-session-mode (detached--session-initial-mode session)))
-                                 `(,detached-dtach-program
-                                   ,dtach-arg
-                                   ,socket
-                                   "-z"
-                                   ,detached-shell-program
-                                   "-c"
-                                   ,(if (eq type 'string)
-                                        (shell-quote-argument (detached--detached-command session))
-                                      (detached--detached-command session))))))
-          (command
-           (if (eq 'detached (detached--session-initial-mode session))
-               (funcall dtach-command-fun session)
-             (if (not (detached-session-degraded-p session))
+  (when (detached--valid-dtach-executable-p session)
+    (detached-register-session session)
+    (detached-connection-local-variables
+     (let* ((socket (detached--session-file session 'socket t))
+            (detached-session-mode (detached--session-initial-mode session))
+            (log (detached--session-file session 'log t))
+            (dtach-arg (if (eq 'detached (detached--session-initial-mode session))
+                           "-n"
+                         "-c"))
+            (dtach-command-fun (lambda (session)
+                                 (let ((detached-session-mode (detached--session-initial-mode session)))
+                                   `(,detached-dtach-program
+                                     ,dtach-arg
+                                     ,socket
+                                     "-z"
+                                     ,detached-shell-program
+                                     "-c"
+                                     ,(if (eq type 'string)
+                                          (shell-quote-argument (detached--detached-command session))
+                                        (detached--detached-command session))))))
+            (command
+             (if (eq 'detached (detached--session-initial-mode session))
                  (funcall dtach-command-fun session)
-               (detached--start-session-process session
-                                                (string-join
-                                                 (funcall dtach-command-fun session) " "))
-               `(,detached-tail-program
-                 "-F"
-                 "-n"
-                 ,(number-to-string detached-session-context-lines)
-                 ,log)))))
-     (pcase type
-       ('string (string-join command " "))
-       ('list command)
-       (_ nil)))))
+               (if (not (detached-session-degraded-p session))
+                   (funcall dtach-command-fun session)
+                 (detached--start-session-process session
+                                                  (string-join
+                                                   (funcall dtach-command-fun session) " "))
+                 `(,detached-tail-program
+                   "-F"
+                   "-n"
+                   ,(number-to-string detached-session-context-lines)
+                   ,log)))))
+       (pcase type
+         ('string (string-join command " "))
+         ('list command)
+         (_ nil))))))
 
 (cl-defun detached-session-attach-command (session &key type)
   "Return command to attach SESSION with specified TYPE."
-  (detached-connection-local-variables
-   (let* ((socket (detached--session-file session 'socket t))
-          (log (detached--session-file session 'log t))
-          (command
-           (if (detached-session-degraded-p session)
-               `(,detached-tail-program "-F"
-                                        "-n"
-                                        ,(number-to-string detached-session-context-lines)
-                                        ,log)
-             (append
-              (when detached-show-session-context
-                `(,detached-tail-program "-n"
-                                         ,(number-to-string detached-session-context-lines)
-                                         ,(concat log ";")))
-              `(,detached-dtach-program "-a"
-                                        ,socket
-                                        "-r" "none")))))
-     (pcase type
-       ('string (string-join command " "))
-       ('list command)
-       (_ nil)))))
+  (when (detached--valid-dtach-executable-p session)
+    (detached-connection-local-variables
+     (let* ((socket (detached--session-file session 'socket t))
+            (log (detached--session-file session 'log t))
+            (command
+             (if (detached-session-degraded-p session)
+                 `(,detached-tail-program "-F"
+                                          "-n"
+                                          ,(number-to-string detached-session-context-lines)
+                                          ,log)
+               (append
+                (when detached-show-session-context
+                  `(,detached-tail-program "-n"
+                                           ,(number-to-string detached-session-context-lines)
+                                           ,(concat log ";")))
+                `(,detached-dtach-program "-a"
+                                          ,socket
+                                          "-r" "none")))))
+       (pcase type
+         ('string (string-join command " "))
+         ('list command)
+         (_ nil))))))
 
 (defun detached-session-output (session)
   "Return content of SESSION's output."
@@ -1183,8 +1191,8 @@ This function uses the `notifications' library."
 (defun detached-session-validated-p (session)
   "Return t if SESSION has been validated."
   (not
-   (alist-get (detached-session-id session)
-              detached--unvalidated-sessions)))
+   (member (detached-session-id session)
+           detached--unvalidated-session-ids)))
 
 (defun detached-session-failed-p (session)
   "Return t if SESSION failed."
@@ -1299,6 +1307,15 @@ This function uses the `notifications' library."
       'active
     'inactive))
 
+
+(defun detached--valid-dtach-executable-p (session)
+  "Verify that dtach executable is accessible for SESSION."
+  (let ((default-directory (detached-session-directory session)))
+    (detached-connection-local-variables
+     (if (executable-find detached-dtach-program t)
+         t
+       (error "The `detached-dtach-program' doesn't contain a path to a dtach executable")))))
+
 (defun detached--state-transition-p (session)
   "Return t if SESSION has transitioned from active to inactive."
   (and
@@ -1367,27 +1384,6 @@ This function uses the `notifications' library."
 (defun detached--decode-session (item)
   "Return the session associated with ITEM."
   (cdr (assoc item detached--session-candidates)))
-
-(defun detached--create-session-validator (session)
-  "Create a function to validate SESSION.
-
-It can take some time for a dtach socket to be created.  Therefore all
-sessions are created with state unknown.  This function creates a
-function to verify that a session was created correctly.  If the
-session is missing its deleted from the database."
-  (setf (alist-get (detached--session-id session) detached--unvalidated-sessions)
-        session)
-  (run-with-timer detached-dtach-socket-creation-delay
-                  nil
-                  (lambda ()
-                    (when (alist-get (detached-session-id session)
-                                     detached--unvalidated-sessions)
-                      (setq detached--unvalidated-sessions
-                            (assq-delete-all (detached-session-id session)
-                                             detached--unvalidated-sessions))
-                      (unless (detached--session-missing-p session)
-                        (setf (detached--session-state session) 'active)
-                        (detached--db-insert-entry session))))))
 
 (defun detached--session-file (session file &optional local)
   "Return the full path to SESSION's FILE.
@@ -1467,10 +1463,12 @@ Optionally make the path LOCAL to host."
 
 (defun detached--detach-from-comint-process ()
   "Detach from the underlying `comint' process."
-  (when-let ((active-session (detached-session-active-p detached-buffer-session))
+  (when-let ((active-session (detached-session-active-p
+                              (alist-get (detached-session-id detached-buffer-session)
+                                         detached--sessions)))
              (dtach-process (get-buffer-process (current-buffer))))
-    (setq detached-buffer-session nil)
-    (comint-simple-send dtach-process detached--dtach-detach-character)))
+    (comint-simple-send dtach-process detached--dtach-detach-character)
+    (setq detached-buffer-session nil)))
 
 (defun detached--quit-session-buffer ()
   "Quit session buffer."
@@ -1815,16 +1813,13 @@ session and trigger a state transition."
                (string= "socket" (file-name-extension file)))
 
       (when-let* ((id (intern (file-name-base file)))
-                  (session
-                   (or (alist-get id detached--unvalidated-sessions)
-                       (detached--db-get-session id)))
+                  (session (detached--db-get-session id))
                   (session-directory (detached-session-directory session))
                   (is-primary
                    (detached--primary-detached-emacs-p session)))
 
         ;; Remove from unvalidated sessions
-        (setq detached--unvalidated-sessions
-              (assq-delete-all id detached--unvalidated-sessions))
+        (setq detached--unvalidated-session-ids (delete id detached--unvalidated-session-ids))
 
         ;; Update session
         (detached--session-state-transition-update session)
@@ -1846,17 +1841,12 @@ session and trigger a state transition."
     (when (and (eq action 'created)
                (string= "log" (file-name-extension file)))
       (when-let* ((id (intern (file-name-base file)))
-                  (session
-                   (or (alist-get id detached--unvalidated-sessions)
-                       (detached--db-get-session id)))
+                  (session (detached--db-get-session id))
                   (session-directory (detached-session-directory session))
-                  (is-primary
-                   (detached--primary-detached-emacs-p session)))
-        (setq detached--unvalidated-sessions
-              (assq-delete-all (detached-session-id session)
-                               detached--unvalidated-sessions))
+                  (is-primary (detached--primary-detached-emacs-p session)))
+        (setq detached--unvalidated-session-ids (delete (detached-session-id session) detached--unvalidated-session-ids))
         (setf (detached--session-state session) 'active)
-        (detached--db-insert-entry session)))))
+        (detached--db-update-entry session)))))
 
 (defun detached--initialize-session (session)
   "Initialize SESSION."
@@ -1873,10 +1863,7 @@ session and trigger a state transition."
       (if (detached--state-transition-p session)
           (detached--session-state-transition-update session 'approximate)
         (detached--db-update-entry session)
-        (detached--watch-session-directory (detached-session-directory session)))
-    (if (detached--session-missing-p session)
-        (detached--db-remove-entry session)
-      (detached--db-update-entry session))))
+        (detached--watch-session-directory (detached-session-directory session)))))
 
 (defun detached--uninitialized-sessions ()
   "Return a list of uninitialized sessions."

@@ -36,7 +36,7 @@
 (defcustom detached-eshell-session-action
   '(:attach detached-shell-command-attach-session
 			:view detached-view-dwim
-			:run detached-shell-command)
+			:run detached-start-shell-command-session)
   "Actions for a session created with `detached-eshell'."
   :group 'detached
   :type 'plist)
@@ -103,7 +103,9 @@
 
 (cl-defmethod detached--detach-session ((_mode (derived-mode eshell-mode)))
   "Detach from session when MODE is `eshell-mode'."
-  (when-let ((active-session (detached-session-active-p detached-buffer-session))
+  (when-let ((active-session (detached-session-active-p
+                              (alist-get (detached-session-id detached-buffer-session)
+                                         detached--sessions)))
              (dtach-process (detached-eshell--get-dtach-process)))
     (setq detached-buffer-session nil)
     (process-send-string dtach-process
