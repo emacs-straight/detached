@@ -5,7 +5,7 @@
 ;; Author: Niklas Eklund <niklas.eklund@posteo.net>
 ;; Maintainer: detached.el Development <~niklaseklund/detached.el@lists.sr.ht>
 ;; URL: https://sr.ht/~niklaseklund/detached.el/
-;; Version: 0.9.2
+;; Version: 0.10.0
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: convenience processes
 
@@ -231,9 +231,11 @@ If set to a non nil value the latest entry to
   (let ((map (make-sparse-keymap)))
     (define-key map "a" #'detached-edit-session-annotation)
     (define-key map "d" #'detached-detach-session)
+    (define-key map "D" #'detached-describe-duration)
     (define-key map "e" #'detached-edit-and-run-session)
     (define-key map "k" #'detached-kill-session)
     (define-key map "r" #'detached-rerun-session)
+    (define-key map "S" #'detached-describe-session)
     (define-key map "w" #'detached-copy-session-command)
     (define-key map "W" #'detached-copy-session-output)
     map))
@@ -268,7 +270,7 @@ Valid values are: create, new and attach")
 (defvar detached-session-annotation nil
   "An annotation string.")
 
-(defconst detached-session-version "0.9.2.2"
+(defconst detached-session-version "0.10.0.0"
   "The version of `detached-session'.
 This version is encoded as [package-version].[revision].")
 
@@ -332,9 +334,6 @@ This version is encoded as [package-version].[revision].")
 
 
 ;;;;; Private
-
-(defvar detached--session-durations nil
-  "An hash-table with duration sessions.")
 
 (defvar detached--sessions-initialized nil
   "Sessions are initialized.")
@@ -571,6 +570,20 @@ Optionally TOGGLE-SESSION-MODE."
        (string-trim
         (detached--session-header session)))
       (goto-char (point-min)))))
+
+;;;###autoload
+(defun detached-describe-duration (session)
+  "Describe the SESSION's duration statistics."
+  (interactive
+   (list (detached-session-in-context)))
+  (let* ((statistics (detached-session-duration-statistics session)))
+    (message "%s: %s %s: %s"
+             (propertize "μ" 'face 'detached-mark-face)
+             (if-let ((mean (plist-get statistics :mean)))
+                  (detached--duration-str2 (plist-get statistics :mean)) "-")
+             (propertize "σ" 'face 'detached-mark-face)
+             (if-let ((std (plist-get statistics :std)))
+                 (detached--duration-str2 std) "-"))))
 
 ;;;###autoload
 (defun detached-attach-session (session)
@@ -830,9 +843,6 @@ active session.  For sessions created with `detached-compile' or
                     sessions)
             ht))
 
-    ;; Hash sessions and their duration times
-    (detached--initialize-sessions-duration-hashtable)
-
     ;; Initialize accessible sessions
     (let ((detached--current-emacsen (detached--active-detached-emacsen)))
       (detached--update-detached-emacsen)
@@ -1054,7 +1064,7 @@ cluttering the `comint-history' with dtach commands."
     (cl-letf* (((getenv "HISTFILE") "")
                (default-directory (detached-session-directory session))
                (buffer (get-buffer-create (format "*dtach-%s*" (detached-session-id session))))
-               (termination-delay 0.1)
+               (termination-delay 0.5)
                (comint-exec-hook
                 `(,(lambda ()
                      (when-let ((process (get-buffer-process (current-buffer))))
@@ -1119,20 +1129,6 @@ cluttering the `comint-history' with dtach commands."
       (plist-get
        (detached--session-time session) :duration)
     (- (time-to-seconds) (detached-session-start-time session))))
-
-(defun detached-session-mean-duration (session)
-  "Return SESSION's mean duration."
-  (when-let* ((duration-statistics
-               (gethash (detached-session-identifier session)
-                        detached--session-durations nil)))
-    (plist-get duration-statistics :mean)))
-
-(defun detached-session-std-duration (session)
-  "Return SESSION's std duration."
-  (when-let* ((duration-statistics
-               (gethash (detached-session-identifier session)
-                        detached--session-durations nil)))
-    (plist-get duration-statistics :std)))
 
 (defun detached-session-host-type (session)
   "Return the type of SESSION's host."
@@ -1211,6 +1207,16 @@ cluttering the `comint-history' with dtach commands."
              (detached-completing-read (detached-get-sessions)))))
     (when (detached-session-p session)
       session)))
+
+(defun detached-session-duration-statistics (session)
+  "Return duration statistics for SESSION."
+  (when-let* ((identifier (detached-session-identifier session))
+              (sessions (thread-last (detached-get-sessions)
+                                     (seq-filter (lambda (it)
+                                                   (string= identifier (detached-session-identifier it))))
+                                     (seq-remove #'detached-session-failed-p)
+                                     (seq-filter #'detached-session-inactive-p))))
+    (detached--get-duration-statistics sessions)))
 
 (defun detached-session-validated-p (session)
   "Return t if SESSION has been validated."
@@ -1505,23 +1511,6 @@ Optionally make the path LOCAL to host."
     (if (= (length (window-list)) 1)
         (kill-buffer)
       (kill-buffer-and-window))))
-
-(defun detached--initialize-sessions-duration-hashtable ()
-  "Initialize the `detached--session-durations'."
-  (let* ((sessions (detached-get-sessions))
-         (grouped-sessions
-          (thread-last sessions
-                       (seq-filter #'detached-session-inactive-p)
-                       (seq-remove #'detached-session-failed-p)
-                       (seq-group-by #'detached-session-identifier))))
-    (setq detached--session-durations
-          (make-hash-table :test #'equal :size (seq-length grouped-sessions)))
-    (thread-last grouped-sessions
-                 (seq-do (lambda (it)
-                           (pcase-let* ((`(,identifier . ,sessions) it))
-                             (puthash identifier
-                                      (detached--get-duration-statistics sessions)
-                                      detached--session-durations)))))))
 
 (defun detached--get-duration-statistics (sessions)
   "Return a plist of duration statistics for SESSIONS."
