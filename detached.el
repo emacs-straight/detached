@@ -5,7 +5,7 @@
 ;; Author: Niklas Eklund <niklas.eklund@posteo.net>
 ;; Maintainer: detached.el Development <~niklaseklund/detached.el@lists.sr.ht>
 ;; URL: https://sr.ht/~niklaseklund/detached.el/
-;; Version: 0.10.0
+;; Version: 0.10.1
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: convenience processes
 
@@ -225,6 +225,12 @@ If set to a non nil value the latest entry to
   :group 'detached
   :type 'sexp)
 
+(defcustom detached-debug-enabled
+  nil
+  "If t enable debug messages in `detached'."
+  :group 'detached
+  :type 'boolean)
+
 ;;;;; Public
 
 (defvar detached-session-map
@@ -270,7 +276,7 @@ Valid values are: create, new and attach")
 (defvar detached-session-annotation nil
   "An annotation string.")
 
-(defconst detached-session-version "0.10.0.0"
+(defconst detached-session-version "0.10.1.0"
   "The version of `detached-session'.
 This version is encoded as [package-version].[revision].")
 
@@ -985,7 +991,16 @@ cluttering the `comint-history' with dtach commands."
         (funcall (detached-session-run-function session) session)))))
 
 (defun detached-watch-session (session)
-  "Start to watch SESSION."
+  "Start to watch SESSION.
+
+If there is no file-notify watch on SESSION's directory it should be
+added.  This watch will ensure that when a socket is created the
+session is set to active and when the socket is deleted it is set to
+inactive.  However there could be situations where the watch creation
+is delayed and takes place after the socket appears.  This is most
+likely to happen on remote hosts.  If so we fallback to a timer for
+session validation."
+  (detached--create-session-validator session)
   (detached--watch-session-directory (detached-session-directory session)))
 
 ;;;;; Public session functions
@@ -1073,10 +1088,14 @@ cluttering the `comint-history' with dtach commands."
                                          ;; Attach to session
                                          (with-current-buffer buffer
                                            (let ((detached-show-session-context nil))
+                                             (when detached-debug-enabled
+                                               (message "Kill function attaching to session %s" (detached-session-id session)))
                                              (detached-shell-attach-session session))
                                            (run-with-timer termination-delay nil
                                                            (lambda ()
                                                              ;; Send termination signal to session
+                                                             (when detached-debug-enabled
+                                                               (message "Kill function sending termination signal to session %s" (detached-session-id session)))
                                                              (with-current-buffer buffer
                                                                (call-interactively #'comint-interrupt-subjob)
                                                                (let ((kill-buffer-query-functions nil))
@@ -1418,6 +1437,30 @@ cluttering the `comint-history' with dtach commands."
 (defun detached--decode-session (item)
   "Return the session associated with ITEM."
   (cdr (assoc item detached--session-candidates)))
+
+(defun detached--create-session-validator (session)
+  "Create a function to validate SESSION.
+
+It can take some time for a dtach socket to be created.  Therefore all
+sessions are created with state unknown.  This function creates a
+function to verify that a session was created correctly.  If the
+session is missing its deleted from the database."
+  (let ((session-id (detached-session-id session))
+        (start-time
+         `(:start ,(time-to-seconds (current-time)) :end 0.0 :duration 0.0 :offset 0.0)))
+    (push session-id detached--unvalidated-session-ids)
+    (run-with-timer detached-dtach-socket-creation-delay
+                    nil
+                    (lambda ()
+                      (when (member session-id detached--unvalidated-session-ids)
+                        (when detached-debug-enabled
+                          (message "Session %s is set to active by validator" session-id))
+                        (let ((session (detached--db-get-session session-id)))
+                          (setq detached--unvalidated-session-ids
+                                (delete session-id detached--unvalidated-session-ids))
+                          (setf (detached--session-state session) 'active)
+                          (setf (detached--session-time session) start-time)
+                          (detached--db-update-entry session)))))))
 
 (defun detached--session-file (session file &optional local)
   "Return the full path to SESSION's FILE.
@@ -1830,9 +1873,12 @@ session and trigger a state transition."
                   (session-directory (detached-session-directory session))
                   (is-primary
                    (detached--primary-detached-emacs-p session)))
+        (when detached-debug-enabled
+          (message "Session %s is set to inactive by notify-watch event" (detached-session-id session)))
 
-        ;; Remove from unvalidated sessions
-        (setq detached--unvalidated-session-ids (delete id detached--unvalidated-session-ids))
+        ;; Remove from un-validated sessions
+        (setq detached--unvalidated-session-ids
+              (delete id detached--unvalidated-session-ids))
 
         ;; Update session
         (detached--session-state-transition-update session)
@@ -1857,7 +1903,10 @@ session and trigger a state transition."
                   (session (detached--db-get-session id))
                   (session-directory (detached-session-directory session))
                   (is-primary (detached--primary-detached-emacs-p session)))
-        (setq detached--unvalidated-session-ids (delete (detached-session-id session) detached--unvalidated-session-ids))
+        (when detached-debug-enabled
+          (message "Session %s is set to active by notify-watch event" (detached-session-id session)))
+        (setq detached--unvalidated-session-ids
+              (delete (detached-session-id session) detached--unvalidated-session-ids))
         (setf (detached--session-state session) 'active)
         (setf (detached--session-time session) `(:start ,(time-to-seconds (current-time)) :end 0.0 :duration 0.0 :offset 0.0))
         (detached--db-update-entry session)))))
